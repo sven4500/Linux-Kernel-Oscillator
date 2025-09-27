@@ -17,10 +17,6 @@
 // speaker-test -D hw:1,0 -c 1 -t sine -r 48000 -f 400 | aplay -D hw:0,0 -r 48000 -f S16_LE -c 2 -B 100000 -v
 // alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
 
-static struct platform_device *pdev;
-static struct ksound_card *card2;
-static struct snd_pcm *pcm;
-
 /*
  * Описание виртуальной карты
  */
@@ -47,8 +43,8 @@ static struct snd_pcm_hardware snd_ksound_playback_hw = {
     .rates = SNDRV_PCM_RATE_48000,
     .rate_min = 48000,
     .rate_max = 48000,
-    .channels_min = 1,              // на моеё системе вывод только 2 канала
-    .channels_max = 1,
+    .channels_min = 2,              // на моей системе вывод динамиков только в 2 канала
+    .channels_max = 2,
     .buffer_bytes_max = 64 * 1024,  //BUFFER_SIZE,
     .period_bytes_min = 1024,
     .period_bytes_max = 32 * 1024,  //BUFFER_SIZE,
@@ -58,6 +54,28 @@ static struct snd_pcm_hardware snd_ksound_playback_hw = {
 };
 
 /*
+ * Генерирует пилообразный сигнал.
+ */
+static void make_saw_ramp(int16_t* samples, int size, int rate, int phase, int frequency)
+{
+    int i;
+    for (i = 0; i < size; i++) {
+        // Saw ramp: scale phase to 16-bit range
+        int16_t sample = (int16_t)((phase * 65536 / rate) - 32768);
+
+        // Write stereo (L+R same)
+        samples[i * 2 + 0] = sample;
+        samples[i * 2 + 1] = sample;
+
+        // Advance phase by frequency (e.g., 400 Hz)
+        phase += frequency;
+        if (phase >= rate) {
+            phase -= rate;
+        }
+    }
+}
+
+/*
  * обработка сэмплов буфера
  */
 static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
@@ -65,26 +83,26 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
     struct ksound_card *card = container_of(timer, struct ksound_card, timer);
     struct snd_pcm_substream *substream = card->substream;
     struct snd_pcm_runtime *runtime;
-    s16 *samples;
+    int16_t *samples;
     size_t period_bytes, offset_bytes;
     u64 period_ns;
-    int i;
 
-    printk(KERN_INFO "ksound: ksound_timer_callback\n");
+    //printk(KERN_INFO "ksound: ksound_timer_callback\n");
     if (!atomic_read(&card->running) || !substream)
         return HRTIMER_NORESTART;
 
     runtime = substream->runtime;
-    samples = (s16*)runtime->dma_area;
+    samples = (int16_t*)runtime->dma_area;
     period_bytes = frames_to_bytes(runtime, runtime->period_size);
 
     offset_bytes = frames_to_bytes(runtime, card->hw_ptr) % runtime->dma_bytes;
-    s16 *ptr = (s16*)((char*)samples + offset_bytes);
-    
-    for (i = 0; i < runtime->period_size; i++) {
-    	//printk("%d ", ptr[i]);
-    }
-    
+    int16_t *ptr = (int16_t*)((char*)samples + offset_bytes);
+
+    make_saw_ramp(ptr, runtime->period_size, runtime->rate, 0, 400);
+    //for (i = 0; i < runtime->period_size; i++) {
+        //printk("%d ", ptr[i]);
+    //}
+
     // подвинуть указатель
     card->hw_ptr = (card->hw_ptr + runtime->period_size) % runtime->buffer_size;
 
@@ -106,13 +124,12 @@ static int snd_ksound_playback_open(struct snd_pcm_substream *substream)
 {
     struct ksound_card *card = substream->pcm->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
-        
-    printk(KERN_INFO "ksound: snd_ksound_playback_open\n");
 
+    card->substream = substream;
     substream->private_data = card;
     runtime->hw = snd_ksound_playback_hw;
-    card->substream = substream;
-       
+
+    printk(KERN_INFO "ksound: snd_ksound_playback_open\n");
     return 0;
 }
 
@@ -138,8 +155,7 @@ static snd_pcm_uframes_t snd_ksound_playback_pointer(struct snd_pcm_substream *s
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
-    printk(KERN_INFO "ksound: %lu, %lu, %p",
-    		card->hw_ptr, runtime->period_size, runtime->dma_area); 
+    //printk(KERN_INFO "ksound: %lu, %lu, %p", card->hw_ptr, runtime->period_size, runtime->dma_area); 
     return card->hw_ptr;
 }
 
@@ -179,8 +195,7 @@ static int snd_ksound_playback_prepare(struct snd_pcm_substream *substream)
     struct snd_pcm_runtime *runtime = substream->runtime;
    
     int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size); // params_buffer_bytes(hw_params)
-    
-    s16 *samples = (s16*)runtime->dma_area;    
+
     printk(KERN_INFO "ksound: snd_ksound_playback_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
     		runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
     
@@ -268,30 +283,17 @@ static struct snd_pcm_ops snd_ksound_playback_ops = {
 };
 
 /*
- * Создать PCM устройство
+ * Глобальные переменные для хранения дескрипторов устройства, карты и пр. Эти
+ * значения зашиваются в поля private_data карты и pcm потока и функциям следует
+ * брать эти данные оттуда поэтому эти переменные максимально внизу.
  */
-static int snd_ksound_new_pcm(struct snd_card *card)
-{
-    int err;
-
-    err = snd_pcm_new(card, DRIVER_NAME, 0, 1, 0, &pcm); // 1 playback, 0 capture
-    if (err < 0)
-        return err;
-
-    strcpy(pcm->name, CARD_NAME);
-    pcm->private_data = card;
-    pcm->info_flags = 0;
-
-    snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_ksound_playback_ops);
-    
-    //snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 64 * 1024, 64 * 1024);
-	//snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 64*1024, 64*1024);
-
-    return 0;
-}
+static struct platform_device *pdev;
+static struct snd_pcm *pcm;
+static struct ksound_card *k_card;
 
 /*
- * инициализация модуля
+ * Инициализирует модуль. Создаёт новый драйвер платформы который выступает в
+ * качестве родителя для ALSA карты.
  */
 static int __init ksound_init(void)
 {
@@ -305,45 +307,53 @@ static int __init ksound_init(void)
     }
     
     // создать виртуальную карту
-    card2 = kzalloc(sizeof(*card2), GFP_KERNEL);
-    if (!card2) {
+    k_card = kzalloc(sizeof(*k_card), GFP_KERNEL);
+    if (!k_card) {
         printk(KERN_ERR "ksound: Cannot allocate card\n");
         return -ENOMEM;
     }
         
     // инциализация полей структуры карты
-    atomic_set(&card2->running, 0);
-    card2->hw_ptr = 0;
-    card2->substream = NULL;
+    atomic_set(&k_card->running, 0);
+    k_card->hw_ptr = 0;
     
-    // создать ALSA карту, в качестве родителя драйвер платформы
-    // aplay -l
-    err = snd_card_new(&pdev->dev, -1, DRIVER_NAME, THIS_MODULE, 0, &card2->card);
+    // создать ALSA карту, в качестве родителя драйвер платформы (aplay -l)
+    err = snd_card_new(&pdev->dev, -1, DRIVER_NAME, THIS_MODULE, 0, &k_card->card);
     if (err < 0) {
         pr_err("Cannot create sound card\n");
-        goto error1;
+        goto __error1;
     }
 
-    strcpy(card2->card->driver, DRIVER_NAME);
-    strcpy(card2->card->shortname, CARD_NAME);
-    sprintf(card2->card->longname, "%s at virtual", CARD_NAME);
+    strcpy(k_card->card->driver, DRIVER_NAME);
+    strcpy(k_card->card->shortname, CARD_NAME);
+    sprintf(k_card->card->longname, "%s at virtual", CARD_NAME);
 
     // создать pcm устройство
-    err = snd_ksound_new_pcm(card2->card);
+    err = snd_pcm_new(k_card->card, DRIVER_NAME, 0, 0, 1, &pcm); // playback, capture
     if (err < 0)
-        goto error2;
+        goto __error2;
+
+    strcpy(pcm->name, CARD_NAME);
+    pcm->private_data = k_card;
+    pcm->info_flags = 0;
+
+    //snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_ksound_playback_ops);
+    snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_ksound_playback_ops);
+
+    //snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 64 * 1024, 64 * 1024);
+    //snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 64*1024, 64*1024);
 
     // зарегистрировать карту
-    err = snd_card_register(card2->card);
+    err = snd_card_register(k_card->card);
     if (err < 0)
-        goto error2;
+        goto __error2;
 
     pr_info("Kernel ALSA sound module loaded successfully\n");
     return 0;
 
-error2:
-    snd_card_free(card2->card);
-error1:
+__error2:
+    snd_card_free(k_card->card);
+__error1:
     platform_device_unregister(pdev);
     return err;
 }
@@ -353,10 +363,9 @@ error1:
  */
 static void __exit ksound_exit(void)
 {
-    if (card2)
+    if (k_card)
     {
-        snd_card_free(card2->card);
-    	//del_timer_sync(&card2->timer);
+        snd_card_free(k_card->card);
 	}
     
     if (pdev)
@@ -364,7 +373,7 @@ static void __exit ksound_exit(void)
         platform_device_unregister(pdev);
     }
     
-    kfree(card2);
+    kfree(k_card);
     pr_info("Kernel ALSA sound module unloaded\n");
 }
 
