@@ -5,6 +5,8 @@
 #include <linux/platform_device.h>
 #include <linux/math64.h>
 #include <linux/ktime.h>
+#include <linux/types.h>    // s16, u64, size_t, ...
+#include <sound/asound.h>   // snd_pcm_uframes_t, ...
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -41,11 +43,11 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .info = (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID),
     .formats = SNDRV_PCM_FMTBIT_S16_LE,
     .rates = SNDRV_PCM_RATE_48000,
-    .rate_min = 48000,
-    .rate_max = 48000,
-    .channels_min = 2,              // на моей системе вывод динамиков только в 2 канала
-    .channels_max = 2,
-    .buffer_bytes_max = 128 * 1024,  //BUFFER_SIZE,
+    .rate_min = 48000,              // минимальная частота дискретизации (runtime->rate)
+    .rate_max = 48000,              // максимальная частота дискретизации (runtime->rate)
+    .channels_min = 2,              // минимальное и максимальное количество каналов
+    .channels_max = 2,              // на моей системе вывод динамиков только в 2 канала
+    .buffer_bytes_max = 128 * 1024, //BUFFER_SIZE,
     .period_bytes_min = 256,
     .period_bytes_max = 16 * 1024,  //BUFFER_SIZE,
     .periods_min = 4,
@@ -55,12 +57,12 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
 /*
  * Генерирует пилообразный сигнал.
  */
-static void make_saw_ramp(int16_t* samples, int count, int rate, int phase, int frequency)
+static void make_saw_ramp(s16* samples, size_t count, int rate, int frequency, int phase)
 {
-    int i;
+    size_t i;
     for (i = 0; i < count; i++) {
         // Saw ramp: scale phase to 16-bit range
-        int16_t sample = (int16_t)(((phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
+        s16 sample = (s16)(((phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
 
         // Write stereo (L+R same)
         samples[i * 2 + 0] = sample;
@@ -68,6 +70,7 @@ static void make_saw_ramp(int16_t* samples, int count, int rate, int phase, int 
 
         // Advance phase by frequency (e.g., 400 Hz)
         phase += frequency;
+
         if (phase >= rate) {
             phase -= rate;
         }
@@ -79,51 +82,55 @@ static void make_saw_ramp(int16_t* samples, int count, int rate, int phase, int 
  */
 static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
 {
-    struct ksound_card *card = container_of(timer, struct ksound_card, timer);
-    struct snd_pcm_substream *substream = card->substream;
-    struct snd_pcm_runtime *runtime = substream->runtime;
+    struct ksound_card *const card = container_of(timer, struct ksound_card, timer);
+    struct snd_pcm_substream *const substream = card->substream;
+    struct snd_pcm_runtime *const runtime = substream->runtime;
 
-    int16_t *samples;
-    size_t buffer_bytes, size = 0;
+    // period - аудио фрагмент, frames - количество дискрет на фрагмент. У нас
+    // 2 канала и 16 бит на канал поэтому frames_to_bytes вернёт period * 4.
+    s16 *const samples = (s16*)(runtime->dma_area + card->hw_ptr);
+    size_t const period_bytes = frames_to_bytes(runtime, runtime->period_size);
+    size_t const buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
     u64 period_ns;
-    ktime_t now;
+    ktime_t const now = ktime_get();
 
+    // runtime->dma_bytes - размер DMA области в байтах, заметил что DMA область
+    // может быть чуть больше чем размер буфера
     BUG_ON(runtime->dma_bytes == 0);
     BUG_ON(substream == 0);
     BUG_ON(card->hw_ptr >= runtime->dma_bytes);
+    WARN_ON(buffer_bytes > runtime->dma_bytes);
 
-    printk(KERN_INFO "ksound: ksound_timer_callback hw_ptr=%lu, period=%lu, buffer=%lu, rate=%lu\n, dmabytes=%d", card->hw_ptr, runtime->period_size, runtime->buffer_size, runtime->rate, runtime->dma_bytes);
+    //printk(KERN_INFO "ksound: ksound_timer_callback hw_ptr=%lu, period=%lu, buffer=%lu, dmabytes=%lu",
+           //card->hw_ptr, runtime->period_size, runtime->buffer_size, runtime->dma_bytes);
+
     if (!atomic_read(&card->running))
         return HRTIMER_NORESTART;
 
-    samples = (int16_t*)(runtime->dma_area + card->hw_ptr); // frames_to_bytes(runtime, card->hw_ptr)
-    //size = min(runtime->dma_area - card->hw_ptr, runtime->period_size) / (runtime->channels * 2);
-    if (frames_to_bytes(runtime, runtime->dma_bytes - card->hw_ptr) >= runtime->period_size)
-        make_saw_ramp(samples, runtime->period_size, runtime->rate, 0, 400);
+    // проверить что не выходим за область DMA, если выйти возможно падение ядра
+    if (runtime->dma_bytes - card->hw_ptr >= period_bytes)
+        make_saw_ramp(samples, runtime->period_size, runtime->rate, 400, 0);
 
-    // runtime->buffer_size * 2 нельзя
-    //for (i = 0; i < runtime->period_size; i++) {
+    //for (i = 0; i < runtime->period_size; i++)
         //printk("%d ", ptr[i]);
-    //}
 
-    // подвинуть указатель
-    //buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
-    //card->hw_ptr += runtime->period_size * (runtime->channels * 2);
-    card->hw_ptr += frames_to_bytes(runtime, runtime->period_size);
+    // Подвинуть указатель на следующий фрагмент. Лучше переходить в начало или
+    // с сохранением хвоста?
+    // card->hw_ptr = (card->hw_ptr + period_bytes) % runtime->dma_bytes;
+    card->hw_ptr += period_bytes;
     if (card->hw_ptr >= runtime->dma_bytes)
         card->hw_ptr = 0;
 
     // уведомить ALSA
     snd_pcm_period_elapsed(substream);
 
-    // Продолжительность периода в нс.
+    // Продолжительность периода в нс. Количество дискрет поделить на частоту
+    // дискретизации даёт секунды, умножаем на NSEC_PER_SEC чтобы получить нс.
     period_ns = div_u64(runtime->period_size * NSEC_PER_SEC, runtime->rate);
 
-    // задать таймер снова
-    //hrtimer_forward_now(timer, ns_to_ktime(period_ns));
-    now = ktime_get();
+    // Задать таймер, так тоже можно. Пока не понимаю как лучше
+    //hrtimer_forward_now(timer, ns_to_ktime(period_ns))
     hrtimer_forward(timer, now, ns_to_ktime(period_ns));
-
     return HRTIMER_RESTART;
 }
 
@@ -159,13 +166,16 @@ static int snd_ksound_capture_close(struct snd_pcm_substream *substream)
 }
 
 /*
- * указатель на место проигрывания в буфере
+ * Указатель на место проигрывания в буфере. Возвращает указатель в дискретах.
  */
 static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *substream)
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
-    //printk(KERN_INFO "ksound: hw_ptr=%lu, period=%lu, bytes=%d\n", card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime, card->hw_ptr));
+    //printk(KERN_INFO "ksound: hw_ptr=%lu, period=%lu, bytes=%d\n",
+           //card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime, card->hw_ptr));
+
+    // похоже что ALSA подсистеме нужен указатель в дискретах, а не байтах
     return bytes_to_frames(substream->runtime, card->hw_ptr);
 }
 
@@ -211,7 +221,7 @@ static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream)
     card->buffer_size = runtime->buffer_size;
     card->period_size = runtime->period_size;
     
-    //make_saw_ramp((int16_t*)runtime->dma_area, runtime->buffer_size, runtime->rate, 0, 400);
+    //make_saw_ramp((s16*)runtime->dma_area, runtime->buffer_size, runtime->rate, 400, 0);
     return 0;
 }
 
