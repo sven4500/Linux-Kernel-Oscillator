@@ -5,8 +5,9 @@
 #include <linux/platform_device.h>
 #include <linux/math64.h>
 #include <linux/ktime.h>
-#include <linux/types.h>    // s16, u64, size_t, ...
-#include <sound/asound.h>   // snd_pcm_uframes_t, ...
+#include <linux/types.h>        // s16, u64, size_t, ...
+#include <linux/fixp-arith.h>   // __fixp_sin32, ...
+#include <sound/asound.h>       // snd_pcm_uframes_t, ...
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -16,6 +17,8 @@
 #define CARD_NAME "KernelSoundCard"
 #define BUFFER_SIZE (64 * 1024)
 
+// https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
+// https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
 // speaker-test -D hw:1,0 -c 1 -t sine -r 48000 -f 400 | aplay -D hw:0,0 -r 48000 -f S16_LE -c 2 -B 100000 -v
 // alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
 
@@ -37,7 +40,7 @@ struct ksound_card
 };
 
 /*
- * Описвание устройства PCM
+ * Описывает PCM поток
  */
 static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .info = (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID),
@@ -57,12 +60,13 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
 /*
  * Генерирует пилообразный сигнал.
  */
-static void make_saw_ramp(s16* samples, size_t count, int rate, int frequency, int phase)
+static void make_saw_wave(s16* samples, size_t count, int rate, int frequency, int phase)
 {
     size_t i;
+
     for (i = 0; i < count; i++) {
         // Saw ramp: scale phase to 16-bit range
-        s16 sample = (s16)(((phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
+        s16 const sample = (s16)(((phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
 
         // Write stereo (L+R same)
         samples[i * 2 + 0] = sample;
@@ -73,6 +77,29 @@ static void make_saw_ramp(s16* samples, size_t count, int rate, int frequency, i
 
         if (phase >= rate) {
             phase -= rate;
+        }
+    }
+}
+
+/*
+ * Генерирует синусоидальный сигнал заданной частоы.
+ */
+static void make_sine_wave(s16 *samples, size_t count, int rate, int frequency, int phase)
+{
+    size_t i;
+    int step = (360 * frequency) / rate;
+
+    for (i = 0; i < count; i++)
+    {
+        s32 const sample = __fixp_sin32(phase); // -0x7fffffff .. +0x7fffffff
+        //buffer[i] = (s16)((val >> 16) * (amplitude / 32767));
+        samples[i * 2 + 0] = (s16)(sample >> 16);
+        samples[i * 2 + 1] = (s16)(sample >> 16);
+
+        phase += step;
+
+        if (phase >= 360) {
+            phase -= 360;
         }
     }
 }
@@ -109,7 +136,8 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
 
     // проверить что не выходим за область DMA, если выйти возможно падение ядра
     if (runtime->dma_bytes - card->hw_ptr >= period_bytes)
-        make_saw_ramp(samples, runtime->period_size, runtime->rate, 400, 0);
+        //make_saw_wave(samples, runtime->period_size, runtime->rate, 400, 0);
+        make_sine_wave(samples, runtime->period_size, runtime->rate, 440, 0);
 
     //for (i = 0; i < runtime->period_size; i++)
         //printk("%d ", ptr[i]);
