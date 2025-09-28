@@ -37,7 +37,7 @@ struct ksound_card
 /*
  * Описвание устройства PCM
  */
-static struct snd_pcm_hardware snd_ksound_playback_hw = {
+static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .info = (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID),
     .formats = SNDRV_PCM_FMTBIT_S16_LE,
     .rates = SNDRV_PCM_RATE_48000,
@@ -45,23 +45,22 @@ static struct snd_pcm_hardware snd_ksound_playback_hw = {
     .rate_max = 48000,
     .channels_min = 2,              // на моей системе вывод динамиков только в 2 канала
     .channels_max = 2,
-    .buffer_bytes_max = 64 * 1024,  //BUFFER_SIZE,
-    .period_bytes_min = 1024,
-    .period_bytes_max = 32 * 1024,  //BUFFER_SIZE,
-    .periods_min = 2,
+    .buffer_bytes_max = 128 * 1024,  //BUFFER_SIZE,
+    .period_bytes_min = 256,
+    .period_bytes_max = 16 * 1024,  //BUFFER_SIZE,
+    .periods_min = 4,
     .periods_max = 1024,
-	.fifo_size = 0,
 };
 
 /*
  * Генерирует пилообразный сигнал.
  */
-static void make_saw_ramp(int16_t* samples, int size, int rate, int phase, int frequency)
+static void make_saw_ramp(int16_t* samples, int count, int rate, int phase, int frequency)
 {
     int i;
-    for (i = 0; i < size; i++) {
+    for (i = 0; i < count; i++) {
         // Saw ramp: scale phase to 16-bit range
-        int16_t sample = (int16_t)((phase * 65536 / rate) - 32768);
+        int16_t sample = (int16_t)(((phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
 
         // Write stereo (L+R same)
         samples[i * 2 + 0] = sample;
@@ -76,67 +75,78 @@ static void make_saw_ramp(int16_t* samples, int size, int rate, int phase, int f
 }
 
 /*
- * обработка сэмплов буфера
+ * Обработка сэмплов буфера. runtime->rate частота дискретизации канала.
  */
 static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
 {
     struct ksound_card *card = container_of(timer, struct ksound_card, timer);
     struct snd_pcm_substream *substream = card->substream;
-    struct snd_pcm_runtime *runtime;
-    int16_t *samples;
-    size_t period_bytes, offset_bytes;
-    u64 period_ns;
+    struct snd_pcm_runtime *runtime = substream->runtime;
 
-    //printk(KERN_INFO "ksound: ksound_timer_callback\n");
-    if (!atomic_read(&card->running) || !substream)
+    int16_t *samples;
+    size_t buffer_bytes, size = 0;
+    u64 period_ns;
+    ktime_t now;
+
+    BUG_ON(runtime->dma_bytes == 0);
+    BUG_ON(substream == 0);
+    BUG_ON(card->hw_ptr >= runtime->dma_bytes);
+
+    printk(KERN_INFO "ksound: ksound_timer_callback hw_ptr=%lu, period=%lu, buffer=%lu, rate=%lu\n, dmabytes=%d", card->hw_ptr, runtime->period_size, runtime->buffer_size, runtime->rate, runtime->dma_bytes);
+    if (!atomic_read(&card->running))
         return HRTIMER_NORESTART;
 
-    runtime = substream->runtime;
-    samples = (int16_t*)runtime->dma_area;
-    period_bytes = frames_to_bytes(runtime, runtime->period_size);
+    samples = (int16_t*)(runtime->dma_area + card->hw_ptr); // frames_to_bytes(runtime, card->hw_ptr)
+    //size = min(runtime->dma_area - card->hw_ptr, runtime->period_size) / (runtime->channels * 2);
+    if (frames_to_bytes(runtime, runtime->dma_bytes - card->hw_ptr) >= runtime->period_size)
+        make_saw_ramp(samples, runtime->period_size, runtime->rate, 0, 400);
 
-    offset_bytes = frames_to_bytes(runtime, card->hw_ptr) % runtime->dma_bytes;
-    int16_t *ptr = (int16_t*)((char*)samples + offset_bytes);
-
-    make_saw_ramp(ptr, runtime->period_size, runtime->rate, 0, 400);
+    // runtime->buffer_size * 2 нельзя
     //for (i = 0; i < runtime->period_size; i++) {
         //printk("%d ", ptr[i]);
     //}
 
     // подвинуть указатель
-    card->hw_ptr = (card->hw_ptr + runtime->period_size) % runtime->buffer_size;
+    //buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
+    //card->hw_ptr += runtime->period_size * (runtime->channels * 2);
+    card->hw_ptr += frames_to_bytes(runtime, runtime->period_size);
+    if (card->hw_ptr >= runtime->dma_bytes)
+        card->hw_ptr = 0;
 
     // уведомить ALSA
     snd_pcm_period_elapsed(substream);
 
-    // посчитать продолжительность периода в нс
-    period_ns = div_u64((u64)runtime->period_size * NSEC_PER_SEC, runtime->rate);
-    
+    // Продолжительность периода в нс.
+    period_ns = div_u64(runtime->period_size * NSEC_PER_SEC, runtime->rate);
+
     // задать таймер снова
-    hrtimer_forward_now(timer, ns_to_ktime(period_ns));
+    //hrtimer_forward_now(timer, ns_to_ktime(period_ns));
+    now = ktime_get();
+    hrtimer_forward(timer, now, ns_to_ktime(period_ns));
+
     return HRTIMER_RESTART;
 }
 
 /*
  * открыть PCM поток
  */
-static int snd_ksound_playback_open(struct snd_pcm_substream *substream)
+static int snd_ksound_capture_open(struct snd_pcm_substream *substream)
 {
     struct ksound_card *card = substream->pcm->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
 
     card->substream = substream;
     substream->private_data = card;
-    runtime->hw = snd_ksound_playback_hw;
+    runtime->hw = snd_ksound_capture_hw;
 
-    printk(KERN_INFO "ksound: snd_ksound_playback_open\n");
+    printk(KERN_INFO "ksound: snd_ksound_capture_open\n");
     return 0;
 }
 
 /*
  * закрыть PCM поток
  */
-static int snd_ksound_playback_close(struct snd_pcm_substream *substream)
+static int snd_ksound_capture_close(struct snd_pcm_substream *substream)
 {
     struct snd_pcm_runtime *runtime = substream->runtime;
     struct ksound_card *card = substream->private_data;
@@ -144,25 +154,25 @@ static int snd_ksound_playback_close(struct snd_pcm_substream *substream)
     card->substream = NULL;
     substream->private_data = NULL;
     
-    printk(KERN_INFO "ksound: snd_ksound_playback_close\n");
+    printk(KERN_INFO "ksound: snd_ksound_capture_close\n");
     return 0;
 }
 
 /*
  * указатель на место проигрывания в буфере
  */
-static snd_pcm_uframes_t snd_ksound_playback_pointer(struct snd_pcm_substream *substream)
+static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *substream)
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
-    //printk(KERN_INFO "ksound: %lu, %lu, %p", card->hw_ptr, runtime->period_size, runtime->dma_area); 
-    return card->hw_ptr;
+    //printk(KERN_INFO "ksound: hw_ptr=%lu, period=%lu, bytes=%d\n", card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime, card->hw_ptr));
+    return bytes_to_frames(substream->runtime, card->hw_ptr);
 }
 
 /*
  * почему этот метод магическим образом очищает поток?
  */
-/*static snd_pcm_uframes_t snd_ksound_playback_pointer(struct snd_pcm_substream *substream)
+/*static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *substream)
 {
 	struct ksound_card *card = substream->private_data;
 	struct snd_pcm_runtime *runtime = substream->runtime;
@@ -172,8 +182,7 @@ static snd_pcm_uframes_t snd_ksound_playback_pointer(struct snd_pcm_substream *s
 	{		
 		// Advance the simulated position 
 		simulated_position += runtime->period_size; 
-//		printk(KERN_INFO "ksound: %lu, %lu, %p",
-//				simulated_position, runtime->period_size, runtime->dma_area); 
+        //printk(KERN_INFO "ksound: %lu, %lu, %p", simulated_position, runtime->period_size, runtime->dma_area);
 		
 		// Wrap around at buffer size 
 		if (simulated_position >= runtime->buffer_size)
@@ -189,40 +198,41 @@ static snd_pcm_uframes_t snd_ksound_playback_pointer(struct snd_pcm_substream *s
 /*
  * подготовка PCM потока
  */
-static int snd_ksound_playback_prepare(struct snd_pcm_substream *substream)
+static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream)
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
    
     int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size); // params_buffer_bytes(hw_params)
 
-    printk(KERN_INFO "ksound: snd_ksound_playback_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
-    		runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
+    printk(KERN_INFO "ksound: snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
+           runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
     
     card->buffer_size = runtime->buffer_size;
     card->period_size = runtime->period_size;
     
+    //make_saw_ramp((int16_t*)runtime->dma_area, runtime->buffer_size, runtime->rate, 0, 400);
     return 0;
 }
 
 /*
  * смена состояние PCM
  */
-static int snd_ksound_playback_trigger(struct snd_pcm_substream *substream, int cmd)
+static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
     
-    printk(KERN_INFO "ksound: snd_ksound_playback_trigger cmd=%d, dma=%p\n",
-        		cmd, runtime->dma_area);
+    printk(KERN_INFO "ksound: snd_ksound_capture_trigger cmd=%d, dma=%p\n", cmd, runtime->dma_area);
         
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
-    {    	
-        atomic_set(&card->running, 1);
+    {
         card->hw_ptr = 0;
         card->frames_since_start = 0;
         card->last_time_ns = ktime_get_ns();
+
+        atomic_set(&card->running, 1);
         
         // запустить таймер
         hrtimer_init(&card->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -244,7 +254,7 @@ static int snd_ksound_playback_trigger(struct snd_pcm_substream *substream, int 
     }
 }
 
-static int snd_ksound_playback_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
+static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
@@ -253,7 +263,7 @@ static int snd_ksound_playback_hw_params(struct snd_pcm_substream *substream, st
     // создать буфер
     err = snd_pcm_lib_alloc_vmalloc_buffer(substream, params_buffer_bytes(hw_params));
     if (err < 0) {
-        printk(KERN_ERR "ksound: snd_ksound_playback_hw_params Failed to allocate buffer\n");
+        printk(KERN_ERR "ksound: snd_ksound_capture_hw_params Failed to allocate buffer\n");
         return err;
     }
 
@@ -261,7 +271,7 @@ static int snd_ksound_playback_hw_params(struct snd_pcm_substream *substream, st
     card->buffer_size = params_buffer_size(hw_params);
     card->period_size = params_period_size(hw_params);
         
-    printk(KERN_INFO "ksound: snd_ksound_playback_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
+    printk(KERN_INFO "ksound: snd_ksound_capture_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
            card->buffer_size, card->period_size, buffer_bytes);
     
     return 0;
@@ -270,16 +280,16 @@ static int snd_ksound_playback_hw_params(struct snd_pcm_substream *substream, st
 /*
  * разрешённые операции с PCM
  */
-static struct snd_pcm_ops snd_ksound_playback_ops = {
-    .open = snd_ksound_playback_open,
-    .close = snd_ksound_playback_close,
+static struct snd_pcm_ops snd_ksound_capture_ops = {
+    .open = snd_ksound_capture_open,
+    .close = snd_ksound_capture_close,
     .ioctl = snd_pcm_lib_ioctl,
-	.hw_params = snd_ksound_playback_hw_params,
+	.hw_params = snd_ksound_capture_hw_params,
     .hw_free = snd_pcm_lib_free_vmalloc_buffer,
-    .prepare = snd_ksound_playback_prepare,
-    .trigger = snd_ksound_playback_trigger,
-    .pointer = snd_ksound_playback_pointer,
-	.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
+    .prepare = snd_ksound_capture_prepare,
+    .trigger = snd_ksound_capture_trigger,
+    .pointer = snd_ksound_capture_pointer,
+	//.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
 };
 
 /*
@@ -337,8 +347,8 @@ static int __init ksound_init(void)
     pcm->private_data = k_card;
     pcm->info_flags = 0;
 
-    //snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_ksound_playback_ops);
-    snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_ksound_playback_ops);
+    //snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_ksound_capture_ops);
+    snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_ksound_capture_ops);
 
     //snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 64 * 1024, 64 * 1024);
     //snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 64*1024, 64*1024);
