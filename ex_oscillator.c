@@ -23,7 +23,8 @@
 // alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
 
 /*
- * Описание виртуальной карты
+ * Описание виртуальной карты. К типам принадлежащим этому модулу добавляю
+ * префикс ksound_.
  */
 struct ksound_card
 {
@@ -37,6 +38,13 @@ struct ksound_card
     snd_pcm_uframes_t hw_ptr;               // указатель проигрываемое место в бфере
     u64 last_time_ns;                       // время обновления указателя
     u64 frames_since_start;                 // всего кадров с начала запуска
+};
+
+struct ksound_wave
+{
+    int frequency;  // частота в Гц
+    int phase;      // текущая фаза
+    int amplitude;  // амплитуда - возможно потом?
 };
 
 /*
@@ -57,50 +65,100 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .periods_max = 1024,
 };
 
+static struct ksound_wave sound_waves[3] = {
+    {
+        .frequency = 480,
+        .phase = 0
+    },
+    {
+        .frequency = 523,
+        .phase = 0
+    },
+    {
+        .frequency = 587,
+        .phase = 0
+    }
+};
+
 /*
- * Генерирует пилообразный сигнал.
+ * Генерирует один пилообразный сигнал.
  */
-static void make_saw_wave(s16* samples, size_t count, int rate, int frequency, int phase)
+static void make_saw_wave(s16* samples, size_t count, int rate, struct ksound_wave *wave)
 {
     size_t i;
 
     for (i = 0; i < count; i++) {
         // Saw ramp: scale phase to 16-bit range
-        s16 const sample = (s16)(((phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
+        s16 const sample = (s16)(((wave->phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
 
-        // Write stereo (L+R same)
+        // Записать дискрету L+R. Не будет работать если изментся количество
+        // каналов. Надо в цикле...
         samples[i * 2 + 0] = sample;
         samples[i * 2 + 1] = sample;
 
         // Advance phase by frequency (e.g., 400 Hz)
-        phase += frequency;
+        wave->phase += wave->frequency;
 
-        if (phase >= rate) {
-            phase -= rate;
+        if (wave->phase >= rate) {
+            wave->phase -= rate;
         }
     }
 }
 
 /*
- * Генерирует синусоидальный сигнал заданной частоы.
+ * Генерирует один гармонический сигнал.
  */
-static void make_sine_wave(s16 *samples, size_t count, int rate, int frequency, int phase)
+static void make_sine_wave(s16 *samples, size_t count, int rate, struct ksound_wave *wave)
 {
-    size_t i;
-    int step = (360 * frequency) / rate;
+    int i;
+    int step = (360 * wave->frequency) / rate;
 
     for (i = 0; i < count; i++)
     {
-        s32 const sample = __fixp_sin32(phase); // -0x7fffffff .. +0x7fffffff
+        s32 const sample = __fixp_sin32(wave->phase) >> 16; // -0x7fffffff .. +0x7fffffff
         //buffer[i] = (s16)((val >> 16) * (amplitude / 32767));
-        samples[i * 2 + 0] = (s16)(sample >> 16);
-        samples[i * 2 + 1] = (s16)(sample >> 16);
 
-        phase += step;
+        wave->phase += step;
 
-        if (phase >= 360) {
-            phase -= 360;
+        if (wave->phase >= 360)
+            wave->phase -= 360;
+
+        samples[i * 2 + 0] = (s16)sample;
+        samples[i * 2 + 1] = (s16)sample;
+    }
+}
+
+/*
+ * Генерирует несколько гармонических сигналов. Сигнал описан в структуре
+ * sine_wave.
+ */
+static void make_sine_waves(s16 *samples, size_t sample_count, int rate, struct ksound_wave *waves, int wave_count)
+{
+    int i, j;
+
+    for (i = 0; i < sample_count; i++)
+    {
+        s32 mixed = 0;
+
+        for (j = 0; j < wave_count; j++)
+        {
+            struct ksound_wave* const wave = &waves[j];
+
+            int const step = (360 * wave->frequency) / rate;
+            s32 const sample = __fixp_sin32(wave->phase) >> 16;
+
+            mixed += sample;
+
+            wave->phase += step;
+
+            if (wave->phase >= 360)
+                wave->phase -= 360;
         }
+
+        mixed /= wave_count;
+
+        samples[i * 2 + 0] = (s16)mixed;
+        samples[i * 2 + 1] = (s16)mixed;
     }
 }
 
@@ -136,8 +194,9 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
 
     // проверить что не выходим за область DMA, если выйти возможно падение ядра
     if (runtime->dma_bytes - card->hw_ptr >= period_bytes)
+        make_sine_waves(samples, runtime->period_size, runtime->rate, sound_waves, sizeof(sound_waves) / sizeof(*sound_waves));
         //make_saw_wave(samples, runtime->period_size, runtime->rate, 400, 0);
-        make_sine_wave(samples, runtime->period_size, runtime->rate, 440, 0);
+        //make_sine_wave(samples, runtime->period_size, runtime->rate, &sine_waves[0]);
 
     //for (i = 0; i < runtime->period_size; i++)
         //printk("%d ", ptr[i]);
