@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -186,7 +188,7 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
     BUG_ON(card->hw_ptr >= runtime->dma_bytes);
     WARN_ON(buffer_bytes > runtime->dma_bytes);
 
-    //printk(KERN_INFO "ksound: ksound_timer_callback hw_ptr=%lu, period=%lu, buffer=%lu, dmabytes=%lu",
+    //pr_info("ksound_timer_callback hw_ptr=%lu, period=%lu, buffer=%lu, dmabytes=%lu",
            //card->hw_ptr, runtime->period_size, runtime->buffer_size, runtime->dma_bytes);
 
     if (!atomic_read(&card->running))
@@ -199,7 +201,7 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
         //make_sine_wave(samples, runtime->period_size, runtime->rate, &sine_waves[0]);
 
     //for (i = 0; i < runtime->period_size; i++)
-        //printk("%d ", ptr[i]);
+        //pr_info("%d ", ptr[i]);
 
     // Подвинуть указатель на следующий фрагмент. Лучше переходить в начало или
     // с сохранением хвоста?
@@ -233,7 +235,7 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream)
     substream->private_data = card;
     runtime->hw = snd_ksound_capture_hw;
 
-    printk(KERN_INFO "ksound: snd_ksound_capture_open\n");
+    pr_info("snd_ksound_capture_open\n");
     return 0;
 }
 
@@ -248,7 +250,7 @@ static int snd_ksound_capture_close(struct snd_pcm_substream *substream)
     card->substream = NULL;
     substream->private_data = NULL;
     
-    printk(KERN_INFO "ksound: snd_ksound_capture_close\n");
+    pr_info("snd_ksound_capture_close\n");
     return 0;
 }
 
@@ -259,7 +261,7 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *su
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
-    //printk(KERN_INFO "ksound: hw_ptr=%lu, period=%lu, bytes=%d\n",
+    //pr_info("hw_ptr=%lu, period=%lu, bytes=%d\n",
            //card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime, card->hw_ptr));
 
     // похоже что ALSA подсистеме нужен указатель в дискретах, а не байтах
@@ -279,7 +281,7 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *su
 	{		
 		// Advance the simulated position 
 		simulated_position += runtime->period_size; 
-        //printk(KERN_INFO "ksound: %lu, %lu, %p", simulated_position, runtime->period_size, runtime->dma_area);
+        //pr_info("%lu, %lu, %p", simulated_position, runtime->period_size, runtime->dma_area);
 		
 		// Wrap around at buffer size 
 		if (simulated_position >= runtime->buffer_size)
@@ -302,7 +304,7 @@ static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream)
    
     int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size); // params_buffer_bytes(hw_params)
 
-    printk(KERN_INFO "ksound: snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
+    pr_info("snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
            runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
     
     card->buffer_size = runtime->buffer_size;
@@ -320,7 +322,7 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int c
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
     
-    printk(KERN_INFO "ksound: snd_ksound_capture_trigger cmd=%d, dma=%p\n", cmd, runtime->dma_area);
+    pr_info("snd_ksound_capture_trigger cmd=%d, dma=%p\n", cmd, runtime->dma_area);
         
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
@@ -360,7 +362,7 @@ static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream, str
     // создать буфер
     err = snd_pcm_lib_alloc_vmalloc_buffer(substream, params_buffer_bytes(hw_params));
     if (err < 0) {
-        printk(KERN_ERR "ksound: snd_ksound_capture_hw_params Failed to allocate buffer\n");
+        pr_info("snd_ksound_capture_hw_params Failed to allocate buffer\n");
         return err;
     }
 
@@ -368,7 +370,7 @@ static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream, str
     card->buffer_size = params_buffer_size(hw_params);
     card->period_size = params_period_size(hw_params);
         
-    printk(KERN_INFO "ksound: snd_ksound_capture_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
+    pr_info("snd_ksound_capture_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
            card->buffer_size, card->period_size, buffer_bytes);
     
     return 0;
@@ -398,6 +400,17 @@ static struct platform_device *pdev;
 static struct snd_pcm *pcm;
 static struct ksound_card *k_card;
 
+// можно ли так инициализировать драйвер платформы?
+//static struct platform_driver my_card_driver = {
+//    .driver = {
+//        .name = "mycard",
+//    },
+//    .probe  = my_card_probe,
+//    .remove = my_card_remove,
+//};
+//
+//module_platform_driver(my_card_driver);
+
 /*
  * Инициализирует модуль. Создаёт новый драйвер платформы который выступает в
  * качестве родителя для ALSA карты.
@@ -409,14 +422,14 @@ static int __init ksound_init(void)
     // создать драйвер платформы
     pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
     if (IS_ERR(pdev)) {
-        pr_err("Cannot create platform device\n");
+        pr_info("cannot create platform device\n");
         return PTR_ERR(pdev);
     }
     
     // создать виртуальную карту
     k_card = kzalloc(sizeof(*k_card), GFP_KERNEL);
     if (!k_card) {
-        printk(KERN_ERR "ksound: Cannot allocate card\n");
+        pr_info("cannot allocate card\n");
         return -ENOMEM;
     }
         
@@ -425,9 +438,10 @@ static int __init ksound_init(void)
     k_card->hw_ptr = 0;
     
     // создать ALSA карту, в качестве родителя драйвер платформы (aplay -l)
+    // для чего приватные данные (0)?
     err = snd_card_new(&pdev->dev, -1, DRIVER_NAME, THIS_MODULE, 0, &k_card->card);
     if (err < 0) {
-        pr_err("Cannot create sound card\n");
+        pr_info("cannot create sound card\n");
         goto __error1;
     }
 
@@ -455,7 +469,7 @@ static int __init ksound_init(void)
     if (err < 0)
         goto __error2;
 
-    pr_info("Kernel ALSA sound module loaded successfully\n");
+    pr_info("kernel ALSA sound module loaded successfully\n");
     return 0;
 
 __error2:
@@ -466,12 +480,13 @@ __error1:
 }
 
 /*
- * деструктор модуля
+ * Уничтожает модуль, освобождает выделенные ресурсы. 
  */
 static void __exit ksound_exit(void)
 {
     if (k_card)
     {
+    	//snd_card_disconnect(k_card->card); // нужен ли disconnect?
         snd_card_free(k_card->card);
 	}
     
@@ -481,7 +496,7 @@ static void __exit ksound_exit(void)
     }
     
     kfree(k_card);
-    pr_info("Kernel ALSA sound module unloaded\n");
+    pr_info("kernel ALSA sound module unloaded\n");
 }
 
 module_init(ksound_init);
