@@ -9,12 +9,15 @@
 #include <linux/ktime.h>
 #include <linux/types.h>        // s16, u64, size_t, ...
 #include <linux/fixp-arith.h>   // __fixp_sin32, ...
+#include <linux/cdev.h>			// struct cdev, ...
 #include <sound/asound.h>       // snd_pcm_uframes_t, ...
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 
+#define DEVICE_NAME "ksound_device"
+#define CLASS_NAME "ksound_class"
 #define DRIVER_NAME "ksound"
 #define CARD_NAME "KernelSoundCard"
 #define BUFFER_SIZE (64 * 1024)
@@ -391,11 +394,25 @@ static struct snd_pcm_ops snd_ksound_capture_ops = {
 	//.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
 };
 
+static const struct file_operations fops = {
+	.owner = THIS_MODULE,
+	//.open =
+	//.release =
+	//.read = 
+	//.write = 
+	//.unloced_ioctl =
+};
+
 /*
  * Глобальные переменные для хранения дескрипторов устройства, карты и пр. Эти
  * значения зашиваются в поля private_data карты и pcm потока и функциям следует
  * брать эти данные оттуда поэтому эти переменные максимально внизу.
  */
+static dev_t dev_num;
+static struct cdev my_cdev;
+static struct class *my_class;
+static struct device *my_device;
+
 static struct platform_device *pdev;
 static struct snd_pcm *pcm;
 static struct ksound_card *k_card;
@@ -418,19 +435,51 @@ static struct ksound_card *k_card;
 static int __init ksound_init(void)
 {
     int err;
+    
+    err = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
+    if (err < 0) {
+    	pr_info("failed to allocate char dev region\n");
+    	err = -1;
+    	goto __error1;
+    }
+    
+    cdev_init(&my_cdev, &fops);
+    my_cdev.owner = THIS_MODULE;
+    err = cdev_add(&my_cdev, dev_num, 1);
+    if (err < 0) {
+    	pr_info("failed to create characted dev\n");
+    	err = -1;
+    	goto __error2;
+    }
+    
+    my_class = class_create(THIS_MODULE, CLASS_NAME);
+    if (IS_ERR(my_class)) {
+    	pr_info("failed to create class\n");
+    	err = -1;
+    	goto __error3;
+    }
+    
+    my_device = device_create(my_class, NULL, dev_num, NULL, DEVICE_NAME);
+    if (IS_ERR(my_device)) {
+    	pr_info("failed to create device\n");
+    	err = -1;
+    	goto __error4;
+    }
 
     // создать драйвер платформы
     pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
     if (IS_ERR(pdev)) {
-        pr_info("cannot create platform device\n");
-        return PTR_ERR(pdev);
+        pr_info("failed to create platform device\n");
+        err = -1;
+        goto __error5;
     }
     
     // создать виртуальную карту
     k_card = kzalloc(sizeof(*k_card), GFP_KERNEL);
     if (!k_card) {
-        pr_info("cannot allocate card\n");
-        return -ENOMEM;
+        pr_info("failed to allocate card struct\n");
+        err = ENOMEM;
+        goto __error6;
     }
         
     // инциализация полей структуры карты
@@ -441,8 +490,9 @@ static int __init ksound_init(void)
     // для чего приватные данные (0)?
     err = snd_card_new(&pdev->dev, -1, DRIVER_NAME, THIS_MODULE, 0, &k_card->card);
     if (err < 0) {
-        pr_info("cannot create sound card\n");
-        goto __error1;
+        pr_info("failed to create sound card\n");
+        err = -1;
+        goto __error7;
     }
 
     strcpy(k_card->card->driver, DRIVER_NAME);
@@ -451,8 +501,11 @@ static int __init ksound_init(void)
 
     // создать pcm устройство
     err = snd_pcm_new(k_card->card, DRIVER_NAME, 0, 0, 1, &pcm); // playback, capture
-    if (err < 0)
-        goto __error2;
+    if (err < 0) {
+    	pr_info("failed to create pcm stream\n");
+    	err = -1;
+        goto __error8;
+    }
 
     strcpy(pcm->name, CARD_NAME);
     pcm->private_data = k_card;
@@ -466,16 +519,35 @@ static int __init ksound_init(void)
 
     // зарегистрировать карту
     err = snd_card_register(k_card->card);
-    if (err < 0)
-        goto __error2;
+    if (err < 0) {
+    	pr_info("failed to register sound card\n");
+    	err = -1;
+        goto __error9;
+    }
 
     pr_info("kernel ALSA sound module loaded successfully\n");
     return 0;
 
+__error9:
+	// освобождается через snd_card_free?
+__error8:
+	BUG_ON(k_card == NULL || k_card->card == NULL);
+	snd_card_free(k_card->card);
+__error7:
+	BUG_ON(k_card == NULL);
+	kfree(k_card);
+	k_card = NULL;
+__error6:
+	platform_device_unregister(pdev);
+__error5:
+	device_destroy(my_class, dev_num);
+__error4:
+	class_destroy(my_class);
+__error3:
+	cdev_del(&my_cdev);
 __error2:
-    snd_card_free(k_card->card);
+    unregister_chrdev_region(dev_num, 1);
 __error1:
-    platform_device_unregister(pdev);
     return err;
 }
 
@@ -484,18 +556,24 @@ __error1:
  */
 static void __exit ksound_exit(void)
 {
-    if (k_card)
-    {
-    	//snd_card_disconnect(k_card->card); // нужен ли disconnect?
-        snd_card_free(k_card->card);
-	}
+	BUG_ON(k_card == NULL || k_card->card == NULL);
+	BUG_ON(k_card == NULL);
+	BUG_ON(pdev == NULL);
+	
+	atomic_set(&k_card->running, 0);
+	
+	//snd_card_disconnect(k_card->card); // нужен ли disconnect?
+    snd_card_free(k_card->card);
+	kfree(k_card);
+    	
+	platform_device_unregister(pdev);
+	pdev = NULL;
     
-    if (pdev)
-    {
-        platform_device_unregister(pdev);
-    }
+	device_destroy(my_class, dev_num);
+	class_destroy(my_class);
+	cdev_del(&my_cdev);
+    unregister_chrdev_region(dev_num, 1);
     
-    kfree(k_card);
     pr_info("kernel ALSA sound module unloaded\n");
 }
 
