@@ -20,10 +20,11 @@
 #define CLASS_NAME "ksound_class"
 #define DRIVER_NAME "ksound"
 #define CARD_NAME "KernelSoundCard"
-#define BUFFER_SIZE (64 * 1024)
 
 // https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
 // https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
+// https://github.com/eclipse-cdt/cdt/tree/main/FAQ#whats-the-best-way-to-set-up-the-cdt-to-navigate-linux-kernel-source
+
 // speaker-test -D hw:1,0 -c 1 -t sine -r 48000 -f 400 | aplay -D hw:0,0 -r 48000 -f S16_LE -c 2 -B 100000 -v
 // alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
 
@@ -34,15 +35,10 @@
 struct ksound_card
 {
     struct snd_card *card;
-    struct snd_pcm *pcm;
     struct hrtimer timer;
     struct snd_pcm_substream *substream;
     atomic_t running;
-    snd_pcm_uframes_t buffer_size;
-    snd_pcm_uframes_t period_size;
     snd_pcm_uframes_t hw_ptr;               // указатель проигрываемое место в бфере
-    u64 last_time_ns;                       // время обновления указателя
-    u64 frames_since_start;                 // всего кадров с начала запуска
 };
 
 struct ksound_wave
@@ -309,11 +305,7 @@ static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream)
 
     pr_info("snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
            runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
-    
-    card->buffer_size = runtime->buffer_size;
-    card->period_size = runtime->period_size;
-    
-    //make_saw_ramp((s16*)runtime->dma_area, runtime->buffer_size, runtime->rate, 400, 0);
+
     return 0;
 }
 
@@ -331,9 +323,6 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int c
     case SNDRV_PCM_TRIGGER_START:
     {
         card->hw_ptr = 0;
-        card->frames_since_start = 0;
-        card->last_time_ns = ktime_get_ns();
-
         atomic_set(&card->running, 1);
         
         // запустить таймер
@@ -370,11 +359,9 @@ static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream, str
     }
 
     buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
-    card->buffer_size = params_buffer_size(hw_params);
-    card->period_size = params_period_size(hw_params);
         
     pr_info("snd_ksound_capture_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
-           card->buffer_size, card->period_size, buffer_bytes);
+    		runtime->buffer_size, runtime->period_size, buffer_bytes);
     
     return 0;
 }
