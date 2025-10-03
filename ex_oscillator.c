@@ -232,25 +232,85 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream)
 
     card->substream = substream;
     substream->private_data = card;
+
+    // обязательно заполнить во время open, иначе ошибка открытия потока!
     runtime->hw = snd_ksound_capture_hw;
 
     pr_info("snd_ksound_capture_open\n");
     return 0;
 }
 
-/*
- * закрыть PCM поток
- */
-static int snd_ksound_capture_close(struct snd_pcm_substream *substream)
+static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
 {
-    struct snd_pcm_runtime *runtime = substream->runtime;
     struct ksound_card *card = substream->private_data;
-        
-    card->substream = NULL;
-    substream->private_data = NULL;
-    
-    pr_info("snd_ksound_capture_close\n");
+    struct snd_pcm_runtime *runtime = substream->runtime;
+    int err = 0, buffer_bytes = 0;
+
+    // создать буфер
+    err = snd_pcm_lib_alloc_vmalloc_buffer(substream, params_buffer_bytes(hw_params));
+    if (err < 0) {
+        pr_info("snd_ksound_capture_hw_params Failed to allocate buffer\n");
+        return err;
+    }
+
+    buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
+
+    pr_info("snd_ksound_capture_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
+    		runtime->buffer_size, runtime->period_size, buffer_bytes);
+
     return 0;
+}
+
+/*
+ * подготовка PCM потока
+ */
+static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream)
+{
+    struct ksound_card *card = substream->private_data;
+    struct snd_pcm_runtime *runtime = substream->runtime;
+
+    int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size); // params_buffer_bytes(hw_params)
+
+    pr_info("snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
+           runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
+
+    return 0;
+}
+
+/*
+ * смена состояние PCM
+ */
+static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int cmd)
+{
+    struct ksound_card *card = substream->private_data;
+    struct snd_pcm_runtime *runtime = substream->runtime;
+
+    pr_info("snd_ksound_capture_trigger cmd=%d, dma=%p\n", cmd, runtime->dma_area);
+
+    switch (cmd) {
+    case SNDRV_PCM_TRIGGER_START:
+    {
+        card->hw_ptr = 0;
+        atomic_set(&card->running, 1);
+
+        // запустить таймер
+        hrtimer_init(&card->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+        card->timer.function = ksound_timer_callback;
+        hrtimer_start(&card->timer, ns_to_ktime(0), HRTIMER_MODE_REL);
+
+        return 0;
+    }
+
+    case SNDRV_PCM_TRIGGER_STOP:
+        atomic_set(&card->running, 0);
+
+        // остановить таймер
+        hrtimer_cancel(&card->timer);
+        return 0;
+
+    default:
+        return -EINVAL;
+    }
 }
 
 /*
@@ -294,75 +354,20 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *su
 }*/
 
 /*
- * подготовка PCM потока
+ * закрыть PCM поток
  */
-static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream)
+static int snd_ksound_capture_close(struct snd_pcm_substream *substream)
 {
-    struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
-   
-    int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size); // params_buffer_bytes(hw_params)
-
-    pr_info("snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
-           runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
-
-    return 0;
-}
-
-/*
- * смена состояние PCM
- */
-static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int cmd)
-{
     struct ksound_card *card = substream->private_data;
-    struct snd_pcm_runtime *runtime = substream->runtime;
-    
-    pr_info("snd_ksound_capture_trigger cmd=%d, dma=%p\n", cmd, runtime->dma_area);
-        
-    switch (cmd) {
-    case SNDRV_PCM_TRIGGER_START:
-    {
-        card->hw_ptr = 0;
-        atomic_set(&card->running, 1);
-        
-        // запустить таймер
-        hrtimer_init(&card->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-        card->timer.function = ksound_timer_callback;
-        hrtimer_start(&card->timer, ns_to_ktime(0), HRTIMER_MODE_REL);
-        
-        return 0;
-    }
-        
-    case SNDRV_PCM_TRIGGER_STOP:
-        atomic_set(&card->running, 0);
-        
-        // остановить таймер
-        hrtimer_cancel(&card->timer);
-        return 0;
-        
-    default:
-        return -EINVAL;
-    }
-}
 
-static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
-{
-    struct ksound_card *card = substream->private_data;
-    struct snd_pcm_runtime *runtime = substream->runtime;
-    int err = 0, buffer_bytes = 0;
-        
-    // создать буфер
-    err = snd_pcm_lib_alloc_vmalloc_buffer(substream, params_buffer_bytes(hw_params));
-    if (err < 0) {
-        pr_info("snd_ksound_capture_hw_params Failed to allocate buffer\n");
-        return err;
-    }
+    card->substream = NULL;
+    substream->private_data = NULL;
 
-    buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
-        
-    pr_info("snd_ksound_capture_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
-    		runtime->buffer_size, runtime->period_size, buffer_bytes);
-    
+    // падает если попытаться освободить
+    //kvfree(substream);
+
+    pr_info("snd_ksound_capture_close\n");
     return 0;
 }
 
