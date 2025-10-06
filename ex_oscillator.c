@@ -21,6 +21,12 @@
 #define DRIVER_NAME "ksound"
 #define CARD_NAME "KernelSoundCard"
 
+#define MYDEV_MAGIC 's'
+
+#define CMD_ADD_WAVE _IOW(MYDEV_MAGIC, 0, int)
+#define CMD_REMOVE_WAVE _IOW(MYDEV_MAGIC, 1, int)
+#define CMD_COUNT 2
+
 // https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
 // https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
 // https://github.com/eclipse-cdt/cdt/tree/main/FAQ#whats-the-best-way-to-set-up-the-cdt-to-navigate-linux-kernel-source
@@ -372,7 +378,7 @@ static int snd_ksound_capture_close(struct snd_pcm_substream *substream)
 }
 
 /*
- * разрешённые операции с PCM
+ * Разрешённые операции с PCM
  */
 static struct snd_pcm_ops snd_ksound_capture_ops = {
     .open = snd_ksound_capture_open,
@@ -386,13 +392,82 @@ static struct snd_pcm_ops snd_ksound_capture_ops = {
 	//.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
 };
 
+/*
+ * Реализует операцию open.
+ */
+static int my_open(struct inode* inode, struct file* file)
+{
+	pr_info("unimplemented open operation\n");
+	return 0;
+}
+
+/*
+ * Реализует операцию ioctl.
+ */
+static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
+{
+	int const magic = _IOC_TYPE(cmd), nr = _IOC_NR(cmd);
+
+	if(magic != MYDEV_MAGIC)
+	{
+		pr_info("bad device magic %d, expected %d\n", magic, MYDEV_MAGIC);
+		return ENOTTY;
+	}
+
+	if (nr >= CMD_COUNT)
+	{
+		pr_info("no such command with index number %d\n", nr);
+		return ENOTTY;
+	}
+
+	switch(cmd)
+	{
+	case CMD_ADD_WAVE:
+		break;
+
+	case CMD_REMOVE_WAVE:
+		break;
+
+	default:
+		BUG_ON(true);
+		break;
+	}
+
+	pr_info("unimplemented ioctl operation\n");
+	return 0;
+}
+
+/*
+ * Реализует операцию read.
+ */
+static ssize_t my_read(struct file* file, char __user* buf, size_t count, loff_t* offset)
+{
+	pr_info("unimplemented read operation\n");
+	return 0;
+}
+
+/*
+ * Реализует операцию write.
+ */
+static ssize_t my_write(struct file* file, char __user const* buf, size_t count, loff_t* offset)
+{
+	pr_info("unimplemented write operation\n");
+	return 0;
+}
+
+static int my_release(struct inode* inode, struct file* file)
+{
+	pr_info("unimplemented release operation\n");
+	return 0;
+}
+
 static const struct file_operations fops = {
 	.owner = THIS_MODULE,
-	//.open =
-	//.release =
-	//.read = 
-	//.write = 
-	//.unloced_ioctl =
+	.open = my_open,
+	.release = my_release,
+	.read = my_read,
+	.write = my_write,
+	.unlocked_ioctl = my_ioctl,
 };
 
 /*
