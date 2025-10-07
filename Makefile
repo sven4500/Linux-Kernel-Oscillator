@@ -27,5 +27,8 @@ reinsmod:
 format:
 >   clang-format -i -- **.c
 
+app_us:
+>	gcc us_oscillator.c -o us_oscillator
+
 # do not associate targets with files
 .PHONY: kbuild clean check format

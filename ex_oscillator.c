@@ -13,7 +13,7 @@
 #include <sound/asound.h>       // snd_pcm_uframes_t, ...
 #include <sound/core.h>
 #include <sound/initval.h>
-#include <sound/pcm.h>
+#include <sound/pcm.h>			// SNDRV_PCM_TRIGGER_START, SNDRV_PCM_TRIGGER_STOP, ...
 #include <sound/pcm_params.h>
 
 #define DEVICE_NAME "ksound_device"
@@ -22,14 +22,13 @@
 #define CARD_NAME "KernelSoundCard"
 
 #define MYDEV_MAGIC 's'
-
-#define CMD_ADD_WAVE _IOW(MYDEV_MAGIC, 0, int)
-#define CMD_REMOVE_WAVE _IOW(MYDEV_MAGIC, 1, int)
-#define CMD_COUNT 2
+#define CMD_ADDWAVE _IOW(MYDEV_MAGIC, 0, u32)
+#define CMD_REMOVEWAVE _IOW(MYDEV_MAGIC, 1, u32)
 
 // https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
 // https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
 // https://github.com/eclipse-cdt/cdt/tree/main/FAQ#whats-the-best-way-to-set-up-the-cdt-to-navigate-linux-kernel-source
+// https://embetronicx.com/tutorials/linux/device-drivers/ioctl-tutorial-in-linux/
 
 // speaker-test -D hw:1,0 -c 1 -t sine -r 48000 -f 400 | aplay -D hw:0,0 -r 48000 -f S16_LE -c 2 -B 100000 -v
 // alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
@@ -315,7 +314,7 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int c
         return 0;
 
     default:
-        return -EINVAL;
+        return EINVAL;
     }
 }
 
@@ -414,7 +413,7 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 		return ENOTTY;
 	}
 
-	if (nr >= CMD_COUNT)
+	if (nr >= 2)
 	{
 		pr_info("no such command with index number %d\n", nr);
 		return ENOTTY;
@@ -422,10 +421,12 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 
 	switch(cmd)
 	{
-	case CMD_ADD_WAVE:
+	case CMD_ADDWAVE:
+		pr_info("add wave command\n");
 		break;
 
-	case CMD_REMOVE_WAVE:
+	case CMD_REMOVEWAVE:
+		pr_info("remove wave command\n");
 		break;
 
 	default:
@@ -512,6 +513,7 @@ static int __init ksound_init(void)
     
     cdev_init(&my_cdev, &fops);
     my_cdev.owner = THIS_MODULE;
+
     err = cdev_add(&my_cdev, dev_num, 1);
     if (err < 0) {
     	pr_info("failed to create characted dev\n");
@@ -526,6 +528,7 @@ static int __init ksound_init(void)
     	goto __error3;
     }
     
+    // добавляет файл /dev/ksound_device
     my_device = device_create(my_class, NULL, dev_num, NULL, DEVICE_NAME);
     if (IS_ERR(my_device)) {
     	pr_info("failed to create device\n");
