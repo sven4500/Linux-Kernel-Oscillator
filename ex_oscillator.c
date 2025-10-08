@@ -21,9 +21,13 @@
 #define DRIVER_NAME "ksound"
 #define CARD_NAME "KernelSoundCard"
 
-#define MYDEV_MAGIC 's'
-#define CMD_ADDWAVE _IOW(MYDEV_MAGIC, 0, u32)
-#define CMD_REMOVEWAVE _IOW(MYDEV_MAGIC, 1, u32)
+#define MYDEVMAGIC 's'
+#define CMDADDWAVE _IOW(MYDEVMAGIC, 0, u32)
+#define CMDREMOVEWAVE _IOW(MYDEVMAGIC, 1, u32)
+
+#define GETWAVEAMP(w) ((w) & 0x7f)
+#define GETWAVEPHASE(w) (((w) >> 7) & 0x1ff)
+#define GETWAVEFREQ(w) (((w) >> 16) & 0xffff)
 
 // https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
 // https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
@@ -407,9 +411,9 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 {
 	int const magic = _IOC_TYPE(cmd), nr = _IOC_NR(cmd);
 
-	if(magic != MYDEV_MAGIC)
+	if(magic != MYDEVMAGIC)
 	{
-		pr_info("bad device magic %d, expected %d\n", magic, MYDEV_MAGIC);
+		pr_info("bad device magic %d, expected %d\n", magic, MYDEVMAGIC);
 		return ENOTTY;
 	}
 
@@ -419,22 +423,31 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 		return ENOTTY;
 	}
 
-	switch(cmd)
+	if (cmd == CMDADDWAVE)
 	{
-	case CMD_ADDWAVE:
-		pr_info("add wave command\n");
-		break;
+		u32 wave;
+		int amp, phase, freq;
 
-	case CMD_REMOVEWAVE:
-		pr_info("remove wave command\n");
-		break;
+		copy_from_user(&wave, (void*)arg, sizeof(wave));
+		amp = GETWAVEAMP(wave);
+		phase = GETWAVEPHASE(wave);
+		freq = GETWAVEFREQ(wave);
 
-	default:
+		pr_info("add wave command wave=0x%x, amp=%d, phase=%d, freq=%d\n", wave, amp, phase, freq);
+	}
+	else if (cmd == CMDREMOVEWAVE)
+	{
+		u32 freq;
+
+		copy_from_user(&freq, (void*)arg, sizeof(freq));
+
+		pr_info("remove wave command freq=%d\n", freq);
+	}
+	else
+	{
 		BUG_ON(true);
-		break;
 	}
 
-	pr_info("unimplemented ioctl operation\n");
 	return 0;
 }
 
