@@ -9,12 +9,20 @@
 #include <linux/ktime.h>
 #include <linux/types.h>        // s16, u64, size_t, ...
 #include <linux/fixp-arith.h>   // __fixp_sin32, ...
-#include <linux/cdev.h>			// struct cdev, ...
+#include <linux/cdev.h>         // struct cdev, ...
 #include <sound/asound.h>       // snd_pcm_uframes_t, ...
 #include <sound/core.h>
 #include <sound/initval.h>
-#include <sound/pcm.h>			// SNDRV_PCM_TRIGGER_START, SNDRV_PCM_TRIGGER_STOP, ...
+#include <sound/pcm.h>          // SNDRV_PCM_TRIGGER_START, SNDRV_PCM_TRIGGER_STOP, ...
 #include <sound/pcm_params.h>
+
+// NOTE: https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
+// NOTE: https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
+// NOTE: https://github.com/eclipse-cdt/cdt/tree/main/FAQ#whats-the-best-way-to-set-up-the-cdt-to-navigate-linux-kernel-source
+// NOTE: https://embetronicx.com/tutorials/linux/device-drivers/ioctl-tutorial-in-linux/
+
+// NOTE: alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
+// NOTE: speaker-test -D hw:1,0 -c 1 -t sine -r 48000 -f 400 | aplay -D hw:0,0 -r 48000 -f S16_LE -c 2 -B 100000 -v
 
 #define DEVICE_NAME "ksound_device"
 #define CLASS_NAME "ksound_class"
@@ -35,14 +43,6 @@
 #define SETWAVEAMP(wave, amp) (((wave) & 0xFFFFFF80) | ((amp) & 0x7f))
 #define SETWAVEPHASE(wave, phase) (((wave) & 0xFFFF007F) | (((phase) & 0x1ff) << 7))
 #define SETWAVEFREQ(wave, freq) (((wave) & 0x0000FFFF) | (((freq) & 0xffff) << 16))
-
-// https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
-// https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
-// https://github.com/eclipse-cdt/cdt/tree/main/FAQ#whats-the-best-way-to-set-up-the-cdt-to-navigate-linux-kernel-source
-// https://embetronicx.com/tutorials/linux/device-drivers/ioctl-tutorial-in-linux/
-
-// speaker-test -D hw:1,0 -c 1 -t sine -r 48000 -f 400 | aplay -D hw:0,0 -r 48000 -f S16_LE -c 2 -B 100000 -v
-// alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
 
 /*
  * Описание виртуальной карты. К типам принадлежащим этому модулу добавляю
@@ -205,12 +205,10 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
     u64 period_ns;
     ktime_t const now = ktime_get();
 
-    // runtime->dma_bytes - размер DMA области в байтах, заметил что DMA область
-    // может быть чуть больше чем размер буфера
-    BUG_ON(runtime->dma_bytes == 0);
-    BUG_ON(substream == 0);
-    BUG_ON(card->hw_ptr >= runtime->dma_bytes);
-    WARN_ON(buffer_bytes > runtime->dma_bytes);
+    // NOTE: runtime->dma_bytes размер DMA области в байтах, заметил что DMA
+    // область может быть чуть больше чем размер буфера
+    BUG_ON(runtime->dma_bytes < buffer_bytes);
+    BUG_ON(card->hw_ptr >= buffer_bytes);
 
     //pr_info("ksound_timer_callback hw_ptr=%lu, period=%lu, buffer=%lu, dmabytes=%lu",
     //card->hw_ptr, runtime->period_size, runtime->buffer_size, runtime->dma_bytes);
@@ -220,7 +218,7 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
 
     // проверить что не выходим за область DMA, если выйти возможно падение ядра
     mutex_lock(&mutex);
-    if (runtime->dma_bytes - card->hw_ptr >= period_bytes) {
+    if (buffer_bytes - card->hw_ptr >= period_bytes) {
         //make_sine_wave(samples, runtime->period_size, runtime->rate, MAKEWAVE(100, 0, 480));
         make_sine_waves(samples, runtime->period_size, runtime->rate, sound_waves, wave_count);
         //make_saw_wave(samples, runtime->period_size, runtime->rate, 400, 0);
@@ -235,7 +233,7 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
     // с сохранением хвоста?
     // card->hw_ptr = (card->hw_ptr + period_bytes) % runtime->dma_bytes;
     card->hw_ptr += period_bytes;
-    if (card->hw_ptr >= runtime->dma_bytes)
+    if (card->hw_ptr >= buffer_bytes)
         card->hw_ptr = 0;
 
     // уведомить ALSA
@@ -268,43 +266,49 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream)
     //snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_RATE, SAMPLE_RATE);
     //snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_CHANNELS, 2);
     //snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE);
+    //snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+    //snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 64, 1*1024*1024);
 
     pr_info("snd_ksound_capture_open\n");
     return 0;
 }
 
-// https://www.kernel.org/doc/html/v4.16/sound/kernel-api/writing-an-alsa-driver.html
 static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream,
                                         struct snd_pcm_hw_params *hw_params)
 {
     struct snd_pcm_runtime const *const runtime = substream->runtime;
-    int const buffer_bytes = params_buffer_bytes(hw_params);
+    size_t const buffer_bytes = params_buffer_bytes(hw_params);
+    size_t const alloc_bytes = ALIGN(buffer_bytes, PAGE_SIZE);
 
-    pr_info("snd_ksound_capture_hw_params %d\n", buffer_bytes);
+    pr_info("snd_ksound_capture_hw_params buffer_bytes=%lu, alloc_bytes=%lu\n", buffer_bytes, alloc_bytes);
 
+    if (alloc_bytes <= 0) {
+        pr_info("snd_ksound_capture_hw_params bad alloc_bytes=%lu\n", alloc_bytes);
+        return EINVAL;
+    }
+
+    // NOTE: исправляется выравниванием буфера по границе страницы alloc_bytes
     // [Сб окт 11 20:22:47 2025] BUG: KASAN: vmalloc-out-of-bounds in snd_pcm_hw_params+0x10ea/0x15a0 [snd_pcm]
     // [Сб окт 11 20:22:47 2025] Write of size 20480 at addr ffffc900001b7000 by task pulseaudio/1509
     // [Сб окт 11 20:22:47 2025] CPU: 4 PID: 1509 Comm: pulseaudio Tainted: G    B      OE    N 6.1.130 #3
     // [Сб окт 11 20:22:47 2025] Hardware name: innotek GmbH VirtualBox/VirtualBox, BIOS VirtualBox 12/01/2006
-    if (buffer_bytes > 0) {
-        snd_pcm_lib_alloc_vmalloc_buffer(substream, buffer_bytes);
-        //snd_pcm_lib_malloc_pages(substream, buffer_bytes);
-    }
 
-    return 0;
+    // NOTE: snd_pcm_lib_free_vmalloc_buffer(substream) нужно ли???
+
+    // NOTE: https://www.kernel.org/doc/html/v5.1/sound/kernel-api/writing-an-alsa-driver.html
+    //return snd_pcm_lib_malloc_pages(substream, buffer_bytes);
+
+    return snd_pcm_lib_alloc_vmalloc_buffer(substream, alloc_bytes);
 }
 
-// https://www.kernel.org/doc/html/v4.16/sound/kernel-api/writing-an-alsa-driver.html
 static int snd_ksound_capture_hw_free(struct snd_pcm_substream *substream)
 {
-    pr_info("snd_ksound_capture_hw_free substream=0x%x\n", substream);
+    pr_info("snd_ksound_capture_hw_free\n");
 
-    if (substream) {
-        snd_pcm_lib_free_vmalloc_buffer(substream);
-        //snd_pcm_lib_free_pages(substream);
-    }
+    // NOTE: // https://www.kernel.org/doc/html/v4.16/sound/kernel-api/writing-an-alsa-driver.html
+    //return snd_pcm_lib_free_pages(substream);
 
-    return 0;
+    return snd_pcm_lib_free_vmalloc_buffer(substream);
 }
 
 /*
@@ -436,7 +440,7 @@ static struct snd_pcm_ops snd_ksound_capture_ops = {
     .prepare = snd_ksound_capture_prepare,
     .trigger = snd_ksound_capture_trigger,
     .pointer = snd_ksound_capture_pointer,
-    //.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
+    //.page = snd_pcm_lib_get_vmalloc_page, // Use this for vmalloc buffers
     //.copy_user
     //.copy_kernel
 };
@@ -457,14 +461,12 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 {
     int const magic = _IOC_TYPE(cmd), nr = _IOC_NR(cmd);
 
-    if(magic != MYDEVMAGIC)
-    {
+    if(magic != MYDEVMAGIC) {
         pr_info("bad device magic %d, expected %d\n", magic, MYDEVMAGIC);
         return ENOTTY;
     }
 
-    if (nr >= 2)
-    {
+    if (nr >= 2) {
         pr_info("no such command with index number %d\n", nr);
         return ENOTTY;
     }
@@ -478,41 +480,40 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
         u32 wave;
         int amp = 0, phase = 0, freq = 0;
 
-        if (new_sound_waves)
-        {
-            copy_from_user(&wave, (void*)arg, sizeof(wave));
-            amp = GETWAVEAMP(wave);
-            phase = GETWAVEPHASE(wave);
-            freq = GETWAVEFREQ(wave);
+        BUG_ON(old_sound_waves == NULL && old_wave_count != 0);
 
-            mutex_lock(&mutex);
-
-            if (old_wave_count > 0)
-            {
-                memcpy(new_sound_waves, old_sound_waves, old_wave_count * sizeof(u32));
-            }
-            new_sound_waves[new_wave_count-1] = wave;
-
-            sound_waves = new_sound_waves;
-            wave_count = new_wave_count;
-
-            BUG_ON(sound_waves == NULL);
-            BUG_ON(wave_count < 1);
-
-            if (old_sound_waves)
-            {
-                kfree(old_sound_waves);
-                old_sound_waves = NULL;
-            }
-
-            mutex_unlock(&mutex);
-        }
-        else
-        {
+        if (!new_sound_waves) {
             pr_info("failed to create wave buffer\n");
+            return -1;
         }
+
+        copy_from_user(&wave, (void*)arg, sizeof(wave));
+
+        amp = GETWAVEAMP(wave);
+        phase = GETWAVEPHASE(wave);
+        freq = GETWAVEFREQ(wave);
 
         pr_info("add wave command wave=0x%x, amp=%d, phase=%d, freq=%d\n", wave, amp, phase, freq);
+
+        mutex_lock(&mutex);
+
+        if (old_wave_count > 0)
+            memcpy(new_sound_waves, old_sound_waves, old_wave_count * sizeof(u32));
+        new_sound_waves[new_wave_count-1] = wave;
+
+        sound_waves = new_sound_waves;
+        wave_count = new_wave_count;
+
+        BUG_ON(sound_waves == NULL);
+        BUG_ON(wave_count < 1);
+
+        if (old_sound_waves)
+        {
+            kfree(old_sound_waves);
+            old_sound_waves = NULL;
+        }
+
+        mutex_unlock(&mutex);
     }
     else if (cmd == CMDREMOVEWAVE)
     {
@@ -521,9 +522,13 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
         copy_from_user(&freq, (void*)arg, sizeof(freq));
 
         pr_info("remove wave command freq=%d\n", freq);
+
+        mutex_lock(&mutex);
+        mutex_unlock(&mutex);
     }
     else
     {
+        pr_info("unknown command cmd=0x%x\n", cmd);
         BUG_ON(true);
     }
 
