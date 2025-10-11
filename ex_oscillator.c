@@ -25,14 +25,16 @@
 #define CMDADDWAVE _IOW(MYDEVMAGIC, 0, u32)
 #define CMDREMOVEWAVE _IOW(MYDEVMAGIC, 1, u32)
 
-// амплитуда 7 бит, фаза 9 бит, частота 16 бит
+// NOTE: амплитуда 7 бит, фаза 9 бит, частота 16 бит
 #define MAKEWAVE(amp, phase, freq) (((amp) & 0x7f) | (((phase) & 0x1ff) << 7) | (((freq) & 0xffff) << 16))
-#define GETWAVEAMP(wave) ((wave) & 0x7f)
-#define GETWAVEPHASE(wave) (((wave) >> 7) & 0x1ff)
-#define GETWAVEFREQ(wave) (((wave) >> 16) & 0xffff)
-//#define SETWAVEAMP
+
+#define GETWAVEAMP(w) ((w) & 0x7f)
+#define GETWAVEPHASE(w) (((w) >> 7) & 0x1ff)
+#define GETWAVEFREQ(w) (((w) >> 16) & 0xffff)
+
+#define SETWAVEAMP(wave, amp) (((wave) & 0xFFFFFF80) | ((amp) & 0x7f))
 #define SETWAVEPHASE(wave, phase) (((wave) & 0xFFFF007F) | (((phase) & 0x1ff) << 7))
-//#define SETWAVEFREQ
+#define SETWAVEFREQ(wave, freq) (((wave) & 0x0000FFFF) | (((freq) & 0xffff) << 16))
 
 // https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
 // https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
@@ -77,18 +79,18 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
 
 // пока кажется что с int работать проще, может понадобиться позже?
 /*struct ksound_wave
-{
-    int frequency;  // частота в Гц
-    int phase;      // текущая фаза
-    int amplitude;  // амплитуда - возможно потом?
-};*/
+ * {
+ *    int frequency;  // частота в Гц
+ *    int phase;      // текущая фаза
+ *    int amplitude;  // амплитуда - возможно потом?
+ * };*/
 
 static u32* sound_waves = NULL;
 static int wave_count = 0;
 
 /*static u32 sound_waves[] = {
-	MAKEWAVE(100, 0, 480), //MAKEWAVE(100, 0, 523), MAKEWAVE(100, 0, 587),
-};*/
+ *	MAKEWAVE(100, 0, 480), //MAKEWAVE(100, 0, 523), MAKEWAVE(100, 0, 587),
+ * };*/
 
 /*
  * Генерирует один пилообразный сигнал.
@@ -96,9 +98,9 @@ static int wave_count = 0;
 static void make_saw_wave(s16* samples, size_t count, int rate, u32 wave)
 {
     size_t i;
-	int const amp = GETWAVEAMP(wave);
-	int phase = GETWAVEPHASE(wave);
-	int const freq = GETWAVEFREQ(wave);
+    int const amp = GETWAVEAMP(wave);
+    int phase = GETWAVEPHASE(wave);
+    int const freq = GETWAVEFREQ(wave);
 
     for (i = 0; i < count; i++)
     {
@@ -107,12 +109,12 @@ static void make_saw_wave(s16* samples, size_t count, int rate, u32 wave)
         phase += freq;
 
         if (phase >= rate)
-        	phase -= rate;
+            phase -= rate;
 
         // Записать дискрету L+R. Не будет работать если изментся количество
-		// каналов. Надо в цикле...
-		samples[i * 2 + 0] = sample;
-		samples[i * 2 + 1] = sample;
+        // каналов. Надо в цикле...
+        samples[i * 2 + 0] = sample;
+        samples[i * 2 + 1] = sample;
     }
 }
 
@@ -121,10 +123,10 @@ static void make_saw_wave(s16* samples, size_t count, int rate, u32 wave)
  */
 static void make_sine_wave(s16 *samples, size_t count, int rate, u32 wave)
 {
-	int i;
-	int const amp = GETWAVEAMP(wave);
-	int phase = GETWAVEPHASE(wave);
-	int const freq = GETWAVEFREQ(wave);
+    int i;
+    int const amp = GETWAVEAMP(wave);
+    int phase = GETWAVEPHASE(wave);
+    int const freq = GETWAVEFREQ(wave);
     int const step = (360 * freq) / rate;
 
     for (i = 0; i < count; i++)
@@ -151,7 +153,7 @@ static void make_sine_waves(s16 *samples, size_t sample_count, int rate, u32* wa
     int i, j;
 
     if (waves == NULL || wave_count <= 0)
-    	return;
+        return;
 
     for (i = 0; i < sample_count; i++)
     {
@@ -161,9 +163,9 @@ static void make_sine_waves(s16 *samples, size_t sample_count, int rate, u32* wa
         {
             u32 const wave = waves[j];
 
-        	int const amp = GETWAVEAMP(wave);
-        	int phase = GETWAVEPHASE(wave);
-        	int const freq = GETWAVEFREQ(wave);
+            int const amp = GETWAVEAMP(wave);
+            int phase = GETWAVEPHASE(wave);
+            int const freq = GETWAVEFREQ(wave);
             int const step = (360 * freq) / rate;
 
             s32 const sample = __fixp_sin32(phase) >> 16;
@@ -211,7 +213,7 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
     WARN_ON(buffer_bytes > runtime->dma_bytes);
 
     //pr_info("ksound_timer_callback hw_ptr=%lu, period=%lu, buffer=%lu, dmabytes=%lu",
-           //card->hw_ptr, runtime->period_size, runtime->buffer_size, runtime->dma_bytes);
+    //card->hw_ptr, runtime->period_size, runtime->buffer_size, runtime->dma_bytes);
 
     if (!atomic_read(&card->running))
         return HRTIMER_NORESTART;
@@ -219,7 +221,7 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
     // проверить что не выходим за область DMA, если выйти возможно падение ядра
     mutex_lock(&mutex);
     if (runtime->dma_bytes - card->hw_ptr >= period_bytes) {
-    	//make_sine_wave(samples, runtime->period_size, runtime->rate, MAKEWAVE(100, 0, 480));
+        //make_sine_wave(samples, runtime->period_size, runtime->rate, MAKEWAVE(100, 0, 480));
         make_sine_waves(samples, runtime->period_size, runtime->rate, sound_waves, wave_count);
         //make_saw_wave(samples, runtime->period_size, runtime->rate, 400, 0);
         //make_sine_wave(samples, runtime->period_size, runtime->rate, &sine_waves[0]);
@@ -227,7 +229,7 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
     mutex_unlock(&mutex);
 
     //for (i = 0; i < runtime->period_size; i++)
-        //pr_info("%d ", ptr[i]);
+    //pr_info("%d ", ptr[i]);
 
     // Подвинуть указатель на следующий фрагмент. Лучше переходить в начало или
     // с сохранением хвоста?
@@ -271,23 +273,36 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream)
     return 0;
 }
 
-static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
+// https://www.kernel.org/doc/html/v4.16/sound/kernel-api/writing-an-alsa-driver.html
+static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream,
+                                        struct snd_pcm_hw_params *hw_params)
 {
-    struct ksound_card *card = substream->private_data;
-    struct snd_pcm_runtime *runtime = substream->runtime;
-    int err = 0, buffer_bytes = 0;
+    struct snd_pcm_runtime const *const runtime = substream->runtime;
+    int const buffer_bytes = params_buffer_bytes(hw_params);
 
-    // создать буфер
-    err = snd_pcm_lib_alloc_vmalloc_buffer(substream, params_buffer_bytes(hw_params));
-    if (err < 0) {
-        pr_info("snd_ksound_capture_hw_params Failed to allocate buffer\n");
-        return err;
+    pr_info("snd_ksound_capture_hw_params %d\n", buffer_bytes);
+
+    // [Сб окт 11 20:22:47 2025] BUG: KASAN: vmalloc-out-of-bounds in snd_pcm_hw_params+0x10ea/0x15a0 [snd_pcm]
+    // [Сб окт 11 20:22:47 2025] Write of size 20480 at addr ffffc900001b7000 by task pulseaudio/1509
+    // [Сб окт 11 20:22:47 2025] CPU: 4 PID: 1509 Comm: pulseaudio Tainted: G    B      OE    N 6.1.130 #3
+    // [Сб окт 11 20:22:47 2025] Hardware name: innotek GmbH VirtualBox/VirtualBox, BIOS VirtualBox 12/01/2006
+    if (buffer_bytes > 0) {
+        snd_pcm_lib_alloc_vmalloc_buffer(substream, buffer_bytes);
+        //snd_pcm_lib_malloc_pages(substream, buffer_bytes);
     }
 
-    buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
+    return 0;
+}
 
-    pr_info("snd_ksound_capture_hw_params buffer_size=%lu, period_size=%lu, buffer_bytes=%u\n",
-    		runtime->buffer_size, runtime->period_size, buffer_bytes);
+// https://www.kernel.org/doc/html/v4.16/sound/kernel-api/writing-an-alsa-driver.html
+static int snd_ksound_capture_hw_free(struct snd_pcm_substream *substream)
+{
+    pr_info("snd_ksound_capture_hw_free substream=0x%x\n", substream);
+
+    if (substream) {
+        snd_pcm_lib_free_vmalloc_buffer(substream);
+        //snd_pcm_lib_free_pages(substream);
+    }
 
     return 0;
 }
@@ -303,7 +318,7 @@ static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream)
     int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size); // params_buffer_bytes(hw_params)
 
     pr_info("snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, format=%d, buffer_bytes=%d\n",
-           runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
+            runtime->buffer_size, runtime->period_size, runtime->format, buffer_bytes);
 
     return 0;
 }
@@ -319,36 +334,36 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int c
     pr_info("snd_ksound_capture_trigger cmd=%d, dma=%p\n", cmd, runtime->dma_area);
 
     switch (cmd) {
-    case SNDRV_PCM_TRIGGER_START:
-    {
-        card->hw_ptr = 0;
-        atomic_set(&card->running, 1);
+        case SNDRV_PCM_TRIGGER_START:
+        {
+            card->hw_ptr = 0;
+            atomic_set(&card->running, 1);
 
-        // запустить таймер
-        hrtimer_init(&card->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-        card->timer.function = ksound_timer_callback;
-        hrtimer_start(&card->timer, ns_to_ktime(0), HRTIMER_MODE_REL);
+            // запустить таймер
+            hrtimer_init(&card->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+            card->timer.function = ksound_timer_callback;
+            hrtimer_start(&card->timer, ns_to_ktime(0), HRTIMER_MODE_REL);
 
-        return 0;
-    }
+            return 0;
+        }
 
-    case SNDRV_PCM_TRIGGER_STOP:
-        atomic_set(&card->running, 0);
+        case SNDRV_PCM_TRIGGER_STOP:
+            atomic_set(&card->running, 0);
 
-        // остановить таймер
-        hrtimer_cancel(&card->timer);
-        return 0;
+            // остановить таймер
+            hrtimer_cancel(&card->timer);
+            return 0;
 
-    case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-        pr_info("capture paused\n");
-        return 0;
+        case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+            pr_info("capture paused\n");
+            return 0;
 
-    case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-        pr_info("capture resumed\n");
-        return 0;
+        case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+            pr_info("capture resumed\n");
+            return 0;
 
-    default:
-        return EINVAL;
+        default:
+            return EINVAL;
     }
 }
 
@@ -359,8 +374,9 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *su
 {
     struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
+
     //pr_info("hw_ptr=%lu, period=%lu, bytes=%d\n",
-           //card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime, card->hw_ptr));
+    //card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime, card->hw_ptr));
 
     // похоже что ALSA подсистеме нужен указатель в дискретах, а не байтах
     return bytes_to_frames(substream->runtime, card->hw_ptr);
@@ -370,27 +386,27 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *su
  * почему этот метод магическим образом очищает поток?
  */
 /*static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream *substream)
-{
-	struct ksound_card *card = substream->private_data;
-	struct snd_pcm_runtime *runtime = substream->runtime;
-	static snd_pcm_uframes_t simulated_position = 0;
-
-	if (atomic_read(&card->running)) 
-	{		
-		// Advance the simulated position 
-		simulated_position += runtime->period_size; 
-        //pr_info("%lu, %lu, %p", simulated_position, runtime->period_size, runtime->dma_area);
-		
-		// Wrap around at buffer size 
-		if (simulated_position >= runtime->buffer_size)
-			simulated_position = 0;
-
-		// Update the card's hardware pointer 
-		card->hw_ptr = simulated_position; 
-	}
-	
-	return card->hw_ptr; 
-}*/
+ * {
+ *	struct ksound_card *card = substream->private_data;
+ *	struct snd_pcm_runtime *runtime = substream->runtime;
+ *	static snd_pcm_uframes_t simulated_position = 0;
+ *
+ *	if (atomic_read(&card->running))
+ *	{
+ *		// Advance the simulated position
+ *		simulated_position += runtime->period_size;
+ *        //pr_info("%lu, %lu, %p", simulated_position, runtime->period_size, runtime->dma_area);
+ *
+ *		// Wrap around at buffer size
+ *		if (simulated_position >= runtime->buffer_size)
+ *			simulated_position = 0;
+ *
+ *		// Update the card's hardware pointer
+ *		card->hw_ptr = simulated_position;
+ *	}
+ *
+ *	return card->hw_ptr;
+ * }*/
 
 /*
  * закрыть PCM поток
@@ -400,31 +416,29 @@ static int snd_ksound_capture_close(struct snd_pcm_substream *substream)
     struct snd_pcm_runtime *runtime = substream->runtime;
     struct ksound_card *card = substream->private_data;
 
-    card->substream = NULL;
+    card->substream = NULL; // substream освобождается на этапе hw_free
     substream->private_data = NULL;
-
-    // падает если попытаться освободить
-    //kvfree(substream);
 
     pr_info("snd_ksound_capture_close\n");
     return 0;
 }
 
 /*
- * Разрешённые операции с PCM
+ * Таблица операторов PCM. Проходит цикл open, hw_params, prepare, trigger,
+ * pointer?, trigger, free, close.
  */
 static struct snd_pcm_ops snd_ksound_capture_ops = {
     .open = snd_ksound_capture_open,
     .close = snd_ksound_capture_close,
-    .ioctl = snd_pcm_lib_ioctl,
-	.hw_params = snd_ksound_capture_hw_params,
-    .hw_free = snd_pcm_lib_free_vmalloc_buffer,
+    .ioctl = snd_pcm_lib_ioctl, // иначе не откроется например через alsaloop
+    .hw_params = snd_ksound_capture_hw_params,
+    .hw_free = snd_ksound_capture_hw_free,
     .prepare = snd_ksound_capture_prepare,
     .trigger = snd_ksound_capture_trigger,
     .pointer = snd_ksound_capture_pointer,
-	//.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
+    //.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
     //.copy_user
-	//.copy_kernel
+    //.copy_kernel
 };
 
 /*
@@ -432,8 +446,8 @@ static struct snd_pcm_ops snd_ksound_capture_ops = {
  */
 static int my_open(struct inode* inode, struct file* file)
 {
-	pr_info("unimplemented open operation\n");
-	return 0;
+    pr_info("unimplemented open operation\n");
+    return 0;
 }
 
 /*
@@ -441,79 +455,79 @@ static int my_open(struct inode* inode, struct file* file)
  */
 static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 {
-	int const magic = _IOC_TYPE(cmd), nr = _IOC_NR(cmd);
+    int const magic = _IOC_TYPE(cmd), nr = _IOC_NR(cmd);
 
-	if(magic != MYDEVMAGIC)
-	{
-		pr_info("bad device magic %d, expected %d\n", magic, MYDEVMAGIC);
-		return ENOTTY;
-	}
+    if(magic != MYDEVMAGIC)
+    {
+        pr_info("bad device magic %d, expected %d\n", magic, MYDEVMAGIC);
+        return ENOTTY;
+    }
 
-	if (nr >= 2)
-	{
-		pr_info("no such command with index number %d\n", nr);
-		return ENOTTY;
-	}
+    if (nr >= 2)
+    {
+        pr_info("no such command with index number %d\n", nr);
+        return ENOTTY;
+    }
 
-	if (cmd == CMDADDWAVE)
-	{
-		int const new_wave_count = wave_count + 1;
-		int const old_wave_count = wave_count;
-		u32* const new_sound_waves = kzalloc(new_wave_count * sizeof(u32), GFP_KERNEL);
-		u32* old_sound_waves = sound_waves;
-		u32 wave;
-		int amp = 0, phase = 0, freq = 0;
+    if (cmd == CMDADDWAVE)
+    {
+        int const new_wave_count = wave_count + 1;
+        int const old_wave_count = wave_count;
+        u32* const new_sound_waves = kzalloc(new_wave_count * sizeof(u32), GFP_KERNEL);
+        u32* old_sound_waves = sound_waves;
+        u32 wave;
+        int amp = 0, phase = 0, freq = 0;
 
-		if (new_sound_waves)
-		{
-			copy_from_user(&wave, (void*)arg, sizeof(wave));
-			amp = GETWAVEAMP(wave);
-			phase = GETWAVEPHASE(wave);
-			freq = GETWAVEFREQ(wave);
+        if (new_sound_waves)
+        {
+            copy_from_user(&wave, (void*)arg, sizeof(wave));
+            amp = GETWAVEAMP(wave);
+            phase = GETWAVEPHASE(wave);
+            freq = GETWAVEFREQ(wave);
 
-			mutex_lock(&mutex);
+            mutex_lock(&mutex);
 
-			if (old_wave_count > 0)
-			{
-				memcpy(new_sound_waves, old_sound_waves, old_wave_count * sizeof(u32));
-			}
-			new_sound_waves[new_wave_count-1] = wave;
+            if (old_wave_count > 0)
+            {
+                memcpy(new_sound_waves, old_sound_waves, old_wave_count * sizeof(u32));
+            }
+            new_sound_waves[new_wave_count-1] = wave;
 
-			sound_waves = new_sound_waves;
-			wave_count = new_wave_count;
+            sound_waves = new_sound_waves;
+            wave_count = new_wave_count;
 
-			BUG_ON(sound_waves == NULL);
-			BUG_ON(wave_count < 1);
+            BUG_ON(sound_waves == NULL);
+            BUG_ON(wave_count < 1);
 
-			if (old_sound_waves)
-			{
-				kfree(old_sound_waves);
-				old_sound_waves = NULL;
-			}
+            if (old_sound_waves)
+            {
+                kfree(old_sound_waves);
+                old_sound_waves = NULL;
+            }
 
-			mutex_unlock(&mutex);
-		}
-		else
-		{
-			pr_info("failed to create wave buffer\n");
-		}
+            mutex_unlock(&mutex);
+        }
+        else
+        {
+            pr_info("failed to create wave buffer\n");
+        }
 
-		pr_info("add wave command wave=0x%x, amp=%d, phase=%d, freq=%d\n", wave, amp, phase, freq);
-	}
-	else if (cmd == CMDREMOVEWAVE)
-	{
-		u32 freq;
+        pr_info("add wave command wave=0x%x, amp=%d, phase=%d, freq=%d\n", wave, amp, phase, freq);
+    }
+    else if (cmd == CMDREMOVEWAVE)
+    {
+        u32 freq;
 
-		copy_from_user(&freq, (void*)arg, sizeof(freq));
+        copy_from_user(&freq, (void*)arg, sizeof(freq));
 
-		pr_info("remove wave command freq=%d\n", freq);
-	}
-	else
-	{
-		BUG_ON(true);
-	}
+        pr_info("remove wave command freq=%d\n", freq);
+    }
+    else
+    {
+        BUG_ON(true);
+    }
 
-	return 0;
+    return 0;
 }
 
 /*
@@ -521,8 +535,8 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
  */
 static ssize_t my_read(struct file* file, char __user* buf, size_t count, loff_t* offset)
 {
-	pr_info("unimplemented read operation\n");
-	return 0;
+    pr_info("unimplemented read operation\n");
+    return 0;
 }
 
 /*
@@ -530,23 +544,23 @@ static ssize_t my_read(struct file* file, char __user* buf, size_t count, loff_t
  */
 static ssize_t my_write(struct file* file, char __user const* buf, size_t count, loff_t* offset)
 {
-	pr_info("unimplemented write operation\n");
-	return 0;
+    pr_info("unimplemented write operation\n");
+    return 0;
 }
 
 static int my_release(struct inode* inode, struct file* file)
 {
-	pr_info("unimplemented release operation\n");
-	return 0;
+    pr_info("unimplemented release operation\n");
+    return 0;
 }
 
 static const struct file_operations fops = {
-	.owner = THIS_MODULE,
-	.open = my_open,
-	.release = my_release,
-	.read = my_read,
-	.write = my_write,
-	.unlocked_ioctl = my_ioctl,
+    .owner = THIS_MODULE,
+    .open = my_open,
+    .release = my_release,
+    .read = my_read,
+    .write = my_write,
+    .unlocked_ioctl = my_ioctl,
 };
 
 /*
@@ -581,37 +595,37 @@ static struct ksound_card *k_card;
 static int __init ksound_init(void)
 {
     int err;
-    
+
     err = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
     if (err < 0) {
-    	pr_info("failed to allocate char dev region\n");
-    	err = -1;
-    	goto __error1;
+        pr_info("failed to allocate char dev region\n");
+        err = -1;
+        goto __error1;
     }
-    
+
     cdev_init(&my_cdev, &fops);
     my_cdev.owner = THIS_MODULE;
 
     err = cdev_add(&my_cdev, dev_num, 1);
     if (err < 0) {
-    	pr_info("failed to create characted dev\n");
-    	err = -1;
-    	goto __error2;
+        pr_info("failed to create characted dev\n");
+        err = -1;
+        goto __error2;
     }
-    
+
     my_class = class_create(THIS_MODULE, CLASS_NAME);
     if (IS_ERR(my_class)) {
-    	pr_info("failed to create class\n");
-    	err = -1;
-    	goto __error3;
+        pr_info("failed to create class\n");
+        err = -1;
+        goto __error3;
     }
-    
+
     // добавляет файл /dev/ksound_device
     my_device = device_create(my_class, NULL, dev_num, NULL, DEVICE_NAME);
     if (IS_ERR(my_device)) {
-    	pr_info("failed to create device\n");
-    	err = -1;
-    	goto __error4;
+        pr_info("failed to create device\n");
+        err = -1;
+        goto __error4;
     }
 
     // создать драйвер платформы
@@ -621,7 +635,7 @@ static int __init ksound_init(void)
         err = -1;
         goto __error5;
     }
-    
+
     // создать виртуальную карту
     k_card = kzalloc(sizeof(*k_card), GFP_KERNEL);
     if (!k_card) {
@@ -629,11 +643,11 @@ static int __init ksound_init(void)
         err = ENOMEM;
         goto __error6;
     }
-        
+
     // инциализация полей структуры карты
     atomic_set(&k_card->running, 0);
     k_card->hw_ptr = 0;
-    
+
     // создать ALSA карту, в качестве родителя драйвер платформы (aplay -l)
     // для чего приватные данные (0)?
     err = snd_card_new(&pdev->dev, -1, DRIVER_NAME, THIS_MODULE, 0, &k_card->card);
@@ -650,8 +664,8 @@ static int __init ksound_init(void)
     // создать pcm устройство
     err = snd_pcm_new(k_card->card, DRIVER_NAME, 0, 0, 1, &pcm); // playback, capture
     if (err < 0) {
-    	pr_info("failed to create pcm stream\n");
-    	err = -1;
+        pr_info("failed to create pcm stream\n");
+        err = -1;
         goto __error8;
     }
 
@@ -668,60 +682,60 @@ static int __init ksound_init(void)
     // зарегистрировать карту
     err = snd_card_register(k_card->card);
     if (err < 0) {
-    	pr_info("failed to register sound card\n");
-    	err = -1;
+        pr_info("failed to register sound card\n");
+        err = -1;
         goto __error9;
     }
 
     pr_info("kernel ALSA sound module loaded successfully\n");
     return 0;
 
-__error9:
-	// освобождается через snd_card_free?
-__error8:
-	BUG_ON(k_card == NULL || k_card->card == NULL);
-	snd_card_free(k_card->card);
-__error7:
-	BUG_ON(k_card == NULL);
-	kfree(k_card);
-	k_card = NULL;
-__error6:
-	platform_device_unregister(pdev);
-__error5:
-	device_destroy(my_class, dev_num);
-__error4:
-	class_destroy(my_class);
-__error3:
-	cdev_del(&my_cdev);
-__error2:
+    __error9:
+    // освобождается через snd_card_free?
+    __error8:
+    BUG_ON(k_card == NULL || k_card->card == NULL);
+    snd_card_free(k_card->card);
+    __error7:
+    BUG_ON(k_card == NULL);
+    kfree(k_card);
+    k_card = NULL;
+    __error6:
+    platform_device_unregister(pdev);
+    __error5:
+    device_destroy(my_class, dev_num);
+    __error4:
+    class_destroy(my_class);
+    __error3:
+    cdev_del(&my_cdev);
+    __error2:
     unregister_chrdev_region(dev_num, 1);
-__error1:
+    __error1:
     return err;
 }
 
 /*
- * Уничтожает модуль, освобождает выделенные ресурсы. 
+ * Уничтожает модуль, освобождает выделенные ресурсы.
  */
 static void __exit ksound_exit(void)
 {
-	BUG_ON(k_card == NULL || k_card->card == NULL);
-	BUG_ON(k_card == NULL);
-	BUG_ON(pdev == NULL);
-	
-	atomic_set(&k_card->running, 0);
-	
-	//snd_card_disconnect(k_card->card); // нужен ли disconnect?
+    BUG_ON(k_card == NULL || k_card->card == NULL);
+    BUG_ON(k_card == NULL);
+    BUG_ON(pdev == NULL);
+
+    atomic_set(&k_card->running, 0);
+
+    //snd_card_disconnect(k_card->card); // нужен ли disconnect?
     snd_card_free(k_card->card);
-	kfree(k_card);
-    	
-	platform_device_unregister(pdev);
-	pdev = NULL;
-    
-	device_destroy(my_class, dev_num);
-	class_destroy(my_class);
-	cdev_del(&my_cdev);
+    kfree(k_card);
+
+    platform_device_unregister(pdev);
+    pdev = NULL;
+
+    device_destroy(my_class, dev_num);
+    class_destroy(my_class);
+    cdev_del(&my_cdev);
     unregister_chrdev_region(dev_num, 1);
-    
+
     pr_info("kernel ALSA sound module unloaded\n");
 }
 
