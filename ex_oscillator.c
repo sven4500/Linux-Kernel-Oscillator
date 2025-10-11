@@ -25,9 +25,14 @@
 #define CMDADDWAVE _IOW(MYDEVMAGIC, 0, u32)
 #define CMDREMOVEWAVE _IOW(MYDEVMAGIC, 1, u32)
 
-#define GETWAVEAMP(w) ((w) & 0x7f)
-#define GETWAVEPHASE(w) (((w) >> 7) & 0x1ff)
-#define GETWAVEFREQ(w) (((w) >> 16) & 0xffff)
+// амплитуда 7 бит, фаза 9 бит, частота 16 бит
+#define MAKEWAVE(amp, phase, freq) (((amp) & 0x7f) | (((phase) & 0x1ff) << 7) | (((freq) & 0xffff) << 16))
+#define GETWAVEAMP(wave) ((wave) & 0x7f)
+#define GETWAVEPHASE(wave) (((wave) >> 7) & 0x1ff)
+#define GETWAVEFREQ(wave) (((wave) >> 16) & 0xffff)
+//#define SETWAVEAMP
+#define SETWAVEPHASE(wave, phase) (((wave) & 0xFFFF007F) | (((phase) & 0x1ff) << 7))
+//#define SETWAVEFREQ
 
 // https://www.kernel.org/doc/html/v4.15/sound/kernel-api/alsa-driver-api.html
 // https://github.com/torvalds/linux/blob/master/include/linux/fixp-arith.h
@@ -50,12 +55,7 @@ struct ksound_card
     snd_pcm_uframes_t hw_ptr;               // указатель проигрываемое место в бфере
 };
 
-struct ksound_wave
-{
-    int frequency;  // частота в Гц
-    int phase;      // текущая фаза
-    int amplitude;  // амплитуда - возможно потом?
-};
+static DEFINE_MUTEX(mutex);
 
 /*
  * Описывает PCM поток
@@ -75,63 +75,67 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .periods_max = 1024,
 };
 
-static struct ksound_wave sound_waves[3] = {
-    {
-        .frequency = 480,
-        .phase = 0
-    },
-    {
-        .frequency = 523,
-        .phase = 0
-    },
-    {
-        .frequency = 587,
-        .phase = 0
-    }
-};
+// пока кажется что с int работать проще, может понадобиться позже?
+/*struct ksound_wave
+{
+    int frequency;  // частота в Гц
+    int phase;      // текущая фаза
+    int amplitude;  // амплитуда - возможно потом?
+};*/
+
+static u32* sound_waves = NULL;
+static int wave_count = 0;
+
+/*static u32 sound_waves[] = {
+	MAKEWAVE(100, 0, 480), //MAKEWAVE(100, 0, 523), MAKEWAVE(100, 0, 587),
+};*/
 
 /*
  * Генерирует один пилообразный сигнал.
  */
-static void make_saw_wave(s16* samples, size_t count, int rate, struct ksound_wave *wave)
+static void make_saw_wave(s16* samples, size_t count, int rate, u32 wave)
 {
     size_t i;
+	int const amp = GETWAVEAMP(wave);
+	int phase = GETWAVEPHASE(wave);
+	int const freq = GETWAVEFREQ(wave);
 
-    for (i = 0; i < count; i++) {
-        // Saw ramp: scale phase to 16-bit range
-        s16 const sample = (s16)(((wave->phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
+    for (i = 0; i < count; i++)
+    {
+        s16 const sample = (s16)(((phase * 8192) / rate) - 4096); // 65536, 32768, 16384, 8192, 4096
+
+        phase += freq;
+
+        if (phase >= rate)
+        	phase -= rate;
 
         // Записать дискрету L+R. Не будет работать если изментся количество
-        // каналов. Надо в цикле...
-        samples[i * 2 + 0] = sample;
-        samples[i * 2 + 1] = sample;
-
-        // Advance phase by frequency (e.g., 400 Hz)
-        wave->phase += wave->frequency;
-
-        if (wave->phase >= rate) {
-            wave->phase -= rate;
-        }
+		// каналов. Надо в цикле...
+		samples[i * 2 + 0] = sample;
+		samples[i * 2 + 1] = sample;
     }
 }
 
 /*
  * Генерирует один гармонический сигнал.
  */
-static void make_sine_wave(s16 *samples, size_t count, int rate, struct ksound_wave *wave)
+static void make_sine_wave(s16 *samples, size_t count, int rate, u32 wave)
 {
-    int i;
-    int step = (360 * wave->frequency) / rate;
+	int i;
+	int const amp = GETWAVEAMP(wave);
+	int phase = GETWAVEPHASE(wave);
+	int const freq = GETWAVEFREQ(wave);
+    int const step = (360 * freq) / rate;
 
     for (i = 0; i < count; i++)
     {
-        s32 const sample = __fixp_sin32(wave->phase) >> 16; // -0x7fffffff .. +0x7fffffff
+        s32 const sample = __fixp_sin32(phase) >> 16; // -0x7fffffff .. +0x7fffffff
         //buffer[i] = (s16)((val >> 16) * (amplitude / 32767));
 
-        wave->phase += step;
+        phase += step;
 
-        if (wave->phase >= 360)
-            wave->phase -= 360;
+        if (phase >= 360)
+            phase -= 360;
 
         samples[i * 2 + 0] = (s16)sample;
         samples[i * 2 + 1] = (s16)sample;
@@ -142,9 +146,12 @@ static void make_sine_wave(s16 *samples, size_t count, int rate, struct ksound_w
  * Генерирует несколько гармонических сигналов. Сигнал описан в структуре
  * sine_wave.
  */
-static void make_sine_waves(s16 *samples, size_t sample_count, int rate, struct ksound_wave *waves, int wave_count)
+static void make_sine_waves(s16 *samples, size_t sample_count, int rate, u32* waves, int wave_count)
 {
     int i, j;
+
+    if (waves == NULL || wave_count <= 0)
+    	return;
 
     for (i = 0; i < sample_count; i++)
     {
@@ -152,17 +159,24 @@ static void make_sine_waves(s16 *samples, size_t sample_count, int rate, struct 
 
         for (j = 0; j < wave_count; j++)
         {
-            struct ksound_wave* const wave = &waves[j];
+            u32 const wave = waves[j];
 
-            int const step = (360 * wave->frequency) / rate;
-            s32 const sample = __fixp_sin32(wave->phase) >> 16;
+        	int const amp = GETWAVEAMP(wave);
+        	int phase = GETWAVEPHASE(wave);
+        	int const freq = GETWAVEFREQ(wave);
+            int const step = (360 * freq) / rate;
+
+            s32 const sample = __fixp_sin32(phase) >> 16;
 
             mixed += sample;
 
-            wave->phase += step;
+            phase += step;
 
-            if (wave->phase >= 360)
-                wave->phase -= 360;
+            if (phase >= 360)
+                phase -= 360;
+
+            // нужно сохранить новую фазу, иначе волна не развивается
+            waves[j] = SETWAVEPHASE(wave, phase);
         }
 
         mixed /= wave_count;
@@ -203,10 +217,14 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer)
         return HRTIMER_NORESTART;
 
     // проверить что не выходим за область DMA, если выйти возможно падение ядра
-    if (runtime->dma_bytes - card->hw_ptr >= period_bytes)
-        make_sine_waves(samples, runtime->period_size, runtime->rate, sound_waves, sizeof(sound_waves) / sizeof(*sound_waves));
+    mutex_lock(&mutex);
+    if (runtime->dma_bytes - card->hw_ptr >= period_bytes) {
+    	//make_sine_wave(samples, runtime->period_size, runtime->rate, MAKEWAVE(100, 0, 480));
+        make_sine_waves(samples, runtime->period_size, runtime->rate, sound_waves, wave_count);
         //make_saw_wave(samples, runtime->period_size, runtime->rate, 400, 0);
         //make_sine_wave(samples, runtime->period_size, runtime->rate, &sine_waves[0]);
+    }
+    mutex_unlock(&mutex);
 
     //for (i = 0; i < runtime->period_size; i++)
         //pr_info("%d ", ptr[i]);
@@ -244,6 +262,10 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream)
 
     // обязательно заполнить во время open, иначе ошибка открытия потока!
     runtime->hw = snd_ksound_capture_hw;
+
+    //snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_RATE, SAMPLE_RATE);
+    //snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_CHANNELS, 2);
+    //snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE);
 
     pr_info("snd_ksound_capture_open\n");
     return 0;
@@ -315,6 +337,14 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream, int c
 
         // остановить таймер
         hrtimer_cancel(&card->timer);
+        return 0;
+
+    case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+        pr_info("capture paused\n");
+        return 0;
+
+    case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+        pr_info("capture resumed\n");
         return 0;
 
     default:
@@ -393,6 +423,8 @@ static struct snd_pcm_ops snd_ksound_capture_ops = {
     .trigger = snd_ksound_capture_trigger,
     .pointer = snd_ksound_capture_pointer,
 	//.page = snd_pcm_lib_get_vmalloc_page,  // Use this for vmalloc buffers
+    //.copy_user
+	//.copy_kernel
 };
 
 /*
@@ -425,13 +457,46 @@ static long my_ioctl(struct file* file, unsigned int cmd, unsigned long arg)
 
 	if (cmd == CMDADDWAVE)
 	{
+		int const new_wave_count = wave_count + 1;
+		int const old_wave_count = wave_count;
+		u32* const new_sound_waves = kzalloc(new_wave_count * sizeof(u32), GFP_KERNEL);
+		u32* old_sound_waves = sound_waves;
 		u32 wave;
-		int amp, phase, freq;
+		int amp = 0, phase = 0, freq = 0;
 
-		copy_from_user(&wave, (void*)arg, sizeof(wave));
-		amp = GETWAVEAMP(wave);
-		phase = GETWAVEPHASE(wave);
-		freq = GETWAVEFREQ(wave);
+		if (new_sound_waves)
+		{
+			copy_from_user(&wave, (void*)arg, sizeof(wave));
+			amp = GETWAVEAMP(wave);
+			phase = GETWAVEPHASE(wave);
+			freq = GETWAVEFREQ(wave);
+
+			mutex_lock(&mutex);
+
+			if (old_wave_count > 0)
+			{
+				memcpy(new_sound_waves, old_sound_waves, old_wave_count * sizeof(u32));
+			}
+			new_sound_waves[new_wave_count-1] = wave;
+
+			sound_waves = new_sound_waves;
+			wave_count = new_wave_count;
+
+			BUG_ON(sound_waves == NULL);
+			BUG_ON(wave_count < 1);
+
+			if (old_sound_waves)
+			{
+				kfree(old_sound_waves);
+				old_sound_waves = NULL;
+			}
+
+			mutex_unlock(&mutex);
+		}
+		else
+		{
+			pr_info("failed to create wave buffer\n");
+		}
 
 		pr_info("add wave command wave=0x%x, amp=%d, phase=%d, freq=%d\n", wave, amp, phase, freq);
 	}
