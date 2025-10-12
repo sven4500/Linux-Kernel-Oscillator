@@ -84,7 +84,7 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .periods_max = 1024,
 };
 
-// пока кажется что с int работать проще, может понадобиться позже?
+// NOTE: пока кажется что с int работать проще, может понадобиться позже?
 /*struct ksound_wave
  * {
  *    int frequency;  // частота в Гц
@@ -99,46 +99,45 @@ static int wave_count = 0;
 /*
  * Генерирует один пилообразный сигнал.
  */
-static void make_saw_wave(s16 *samples, size_t count, int rate, u32 wave) {
-    size_t i;
-    // TODO: int const amp = GETWAVEAMP(wave);
-    int phase = GETWAVEPHASE(wave);
-    int const freq = GETWAVEFREQ(wave);
-
-    for (i = 0; i < count; i++) {
-        // NOTE: 65536, 32768, 16384, 8192, 4096
-        s16 const sample = (s16)(((phase * 8192) / rate) - 4096);
-
-        phase += freq;
-        if (phase >= rate) phase -= rate;
-
-        // NOTE: записать дискрету L+R, не работает с другим количество каналов
-        samples[i * 2 + 0] = sample;
-        samples[i * 2 + 1] = sample;
-    }
-}
+// static void make_saw_wave(s16 *samples, size_t count, int rate, u32 wave) {
+//     size_t i;
+//     // TODO: int const amp = GETWAVEAMP(wave);
+//     int phase = GETWAVEPHASE(wave);
+//     int const freq = GETWAVEFREQ(wave);
+//
+//     for (i = 0; i < count; i++) {
+//         // NOTE: 65536, 32768, 16384, 8192, 4096 чтобы сделать потише
+//         s16 const sample = (s16)(((phase * 8192) / rate) - 4096);
+//
+//         phase += freq;
+//         if (phase >= rate) phase -= rate;
+//
+//         // NOTE: записать дискрету L+R, не работает с другим количество
+//         каналов samples[i * 2 + 0] = sample; samples[i * 2 + 1] = sample;
+//     }
+// }
 
 /*
  * Генерирует один гармонический сигнал.
  */
-static void make_sine_wave(s16 *samples, size_t count, int rate, u32 wave) {
-    int i;
-    // TODO: int const amp = GETWAVEAMP(wave);
-    int phase = GETWAVEPHASE(wave);
-    int const freq = GETWAVEFREQ(wave);
-    int const step = (360 * freq) / rate;
-
-    for (i = 0; i < count; i++) {
-        // NOTE: -0x7fffffff .. +0x7fffffff
-        s32 const sample = __fixp_sin32(phase) >> 16;
-
-        phase += step;
-        if (phase >= 360) phase -= 360;
-
-        samples[i * 2 + 0] = (s16)sample;
-        samples[i * 2 + 1] = (s16)sample;
-    }
-}
+// static void make_sine_wave(s16 *samples, size_t count, int rate, u32 wave) {
+//     int i;
+//     // TODO: int const amp = GETWAVEAMP(wave);
+//     int phase = GETWAVEPHASE(wave);
+//     int const freq = GETWAVEFREQ(wave);
+//     int const step = (360 * freq) / rate;
+//
+//     for (i = 0; i < count; i++) {
+//         // NOTE: -0x7fffffff .. +0x7fffffff
+//         s32 const sample = __fixp_sin32(phase) >> 16;
+//
+//         phase += step;
+//         if (phase >= 360) phase -= 360;
+//
+//         samples[i * 2 + 0] = (s16)sample;
+//         samples[i * 2 + 1] = (s16)sample;
+//     }
+// }
 
 /*
  * Генерирует несколько гармонических сигналов. Сигнал описан в структуре
@@ -210,21 +209,14 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer) {
     mutex_lock(&mutex);
 
     if (buffer_bytes - card->hw_ptr >= period_bytes) {
-        // TODO: после удаления последней волны её всё равно слышно. Как будто
-        // в DMA буфере остаются данные. Можно ли его не перезаписывать DMA?
+        // TODO: после удаления последней волны её всё равно слышно если не
+        // записать в буфер нули. Как будто в DMA буфере остаются данные. Можно
+        // ли его не перезаписывать DMA каждый раз?
         make_sine_waves(samples, runtime->period_size, runtime->rate,
                         sound_waves, wave_count);
-        // make_sine_wave(samples, runtime->period_size, runtime->rate,
-        // MAKEWAVE(100, 0, 480));
-        // make_saw_wave(samples, runtime->period_size, runtime->rate, 400,
-        // 0); make_sine_wave(samples, runtime->period_size, runtime->rate,
-        // &sine_waves[0]);
     }
 
     mutex_unlock(&mutex);
-
-    // for (i = 0; i < runtime->period_size; i++)
-    // pr_info("%d ", ptr[i]);
 
     // Подвинуть указатель на следующий фрагмент. Лучше переходить в начало или
     // с сохранением хвоста?
@@ -272,7 +264,6 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream) {
 
 static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream,
                                         struct snd_pcm_hw_params *hw_params) {
-    struct snd_pcm_runtime const *const runtime = substream->runtime;
     size_t const buffer_bytes = params_buffer_bytes(hw_params);
     size_t const alloc_bytes = ALIGN(buffer_bytes, PAGE_SIZE);
 
@@ -316,7 +307,6 @@ static int snd_ksound_capture_hw_free(struct snd_pcm_substream *substream) {
  * подготовка PCM потока
  */
 static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream) {
-    struct ksound_card *card = substream->private_data;
     struct snd_pcm_runtime *runtime = substream->runtime;
 
     int buffer_bytes = frames_to_bytes(
@@ -381,52 +371,47 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream,
 static snd_pcm_uframes_t snd_ksound_capture_pointer(
     struct snd_pcm_substream *substream) {
     struct ksound_card *card = substream->private_data;
-    struct snd_pcm_runtime *runtime = substream->runtime;
 
     // pr_info("hw_ptr=%lu, period=%lu, bytes=%d\n",
     // card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime,
     // card->hw_ptr));
 
-    // похоже что ALSA подсистеме нужен указатель в дискретах, а не байтах
+    // NOTE: похоже что ALSA подсистеме нужен указатель в дискретах, а не байтах
     return bytes_to_frames(substream->runtime, card->hw_ptr);
 }
 
-/*
- * почему этот метод магическим образом очищает поток?
- */
-/*static snd_pcm_uframes_t snd_ksound_capture_pointer(struct snd_pcm_substream
- **substream)
- * {
- *	struct ksound_card *card = substream->private_data;
- *	struct snd_pcm_runtime *runtime = substream->runtime;
- *	static snd_pcm_uframes_t simulated_position = 0;
- *
- *	if (atomic_read(&card->running))
- *	{
- *		// Advance the simulated position
- *		simulated_position += runtime->period_size;
- *        //pr_info("%lu, %lu, %p", simulated_position, runtime->period_size,
- *runtime->dma_area);
- *
- *		// Wrap around at buffer size
- *		if (simulated_position >= runtime->buffer_size)
- *			simulated_position = 0;
- *
- *		// Update the card's hardware pointer
- *		card->hw_ptr = simulated_position;
- *	}
- *
- *	return card->hw_ptr;
- * }*/
+// TODO: почему этот метод магическим образом очищает поток?
+// static snd_pcm_uframes_t snd_ksound_capture_pointer(
+//    struct snd_pcm_substream *substream) {
+//    struct ksound_card *card = substream->private_data;
+//    struct snd_pcm_runtime *runtime = substream->runtime;
+//    static snd_pcm_uframes_t simulated_position = 0;
+//
+//    if (atomic_read(&card->running)) {
+//        // Advance the simulated position
+//        simulated_position += runtime->period_size;
+//        // pr_info("%lu, %lu, %p", simulated_position, runtime->period_size,
+//        runtime->dma_area);
+//
+//        // Wrap around at buffer size
+//        if (simulated_position >= runtime->buffer_size) simulated_position =
+//        0;
+//
+//        // Update the card's hardware pointer
+//        card->hw_ptr = simulated_position;
+//    }
+//
+//    return card->hw_ptr;
+//}
 
 /*
  * закрыть PCM поток
  */
 static int snd_ksound_capture_close(struct snd_pcm_substream *substream) {
-    struct snd_pcm_runtime *runtime = substream->runtime;
     struct ksound_card *card = substream->private_data;
 
-    card->substream = NULL;  // substream освобождается на этапе hw_free
+    // NOTE: substream освобождается на этапе hw_free
+    card->substream = NULL;
     substream->private_data = NULL;
 
     pr_info("snd_ksound_capture_close\n");
@@ -488,14 +473,17 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
 
         if (!new_waves) {
             pr_info("my_ioctl failed to create wave buffer\n");
-            return -1;
+            return ENOMEM;
         }
 
         BUG_ON(old_waves == NULL && old_wave_count != 0);
         BUG_ON(new_waves == NULL);
         BUG_ON(new_wave_count < 1);
 
-        copy_from_user(&wave, (void *)arg, sizeof(wave));
+        if (copy_from_user(&wave, (void *)arg, sizeof(wave)) != 0) {
+            pr_info("my_ioctl failed to copy from user\n");
+            return EAGAIN;
+        }
 
         amp = GETWAVEAMP(wave);
         phase = GETWAVEPHASE(wave);
@@ -530,7 +518,10 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
 
         BUG_ON(old_waves == NULL && old_wave_count != 0);
 
-        copy_from_user(&freq, (void *)arg, sizeof(freq));
+        if (copy_from_user(&freq, (void *)arg, sizeof(freq)) != 0) {
+            pr_info("my_ioctl failed to copy from user\n");
+            return EAGAIN;
+        }
 
         pr_info("my_ioctl remove freq=%d\n", freq);
 
@@ -728,14 +719,13 @@ static int __init ksound_init(void) {
     pcm->private_data = k_card;
     pcm->info_flags = 0;
 
-    // snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK,
-    // &snd_ksound_capture_ops);
+    // NOTE: SNDRV_PCM_STREAM_PLAYBACK для устройства воспроизведения
     snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_ksound_capture_ops);
 
-    // snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL,
-    // 64
-    // * 1024, 64 * 1024); snd_pcm_set_managed_buffer_all(pcm,
-    // SNDRV_DMA_TYPE_VMALLOC, NULL, 64*1024, 64*1024);
+    // TODO: snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_VMALLOC,
+    // NULL, 64 * 1024, 64 * 1024);
+    // TODO: snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL,
+    // 64 * 1024, 64 * 1024);
 
     // NOTE: зарегистрировать карту
     err = snd_card_register(k_card->card);
@@ -775,18 +765,19 @@ __error1:
  * Уничтожает модуль, освобождает выделенные ресурсы.
  */
 static void __exit ksound_exit(void) {
-    BUG_ON(k_card == NULL || k_card->card == NULL);
     BUG_ON(k_card == NULL);
+    BUG_ON(k_card->card == NULL);
     BUG_ON(pdev == NULL);
 
     atomic_set(&k_card->running, 0);
 
-    // TODO: нужен ли snd_card_disconnect(k_card->card)?
+    if (hrtimer_active(&k_card->timer)) hrtimer_cancel(&k_card->timer);
+
+    snd_card_disconnect(k_card->card);
     snd_card_free(k_card->card);
     kfree(k_card);
 
     platform_device_unregister(pdev);
-    pdev = NULL;
 
     device_destroy(my_class, dev_num);
     class_destroy(my_class);

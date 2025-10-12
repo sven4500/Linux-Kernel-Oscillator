@@ -22,7 +22,7 @@ check:
 >   sudo ./check.sh
 
 reinsmod:
->	sudo ./reinsmod.sh
+>   sudo ./reinsmod.sh
 
 # https://clang.llvm.org/docs/ClangFormat.html
 # https://clang.llvm.org/docs/ClangFormatStyleOptions.html
@@ -30,7 +30,7 @@ format:
 >   clang-format --style="{BasedOnStyle: google, IndentWidth: 4, ReflowComments: true}" -i -- **.c
 
 app_us:
->	gcc us_oscillator.c -o ./build/us_oscillator
+>   gcc us_oscillator.c -o ./build/us_oscillator
 
 # do not associate targets with files
 .PHONY: kbuild clean check format
