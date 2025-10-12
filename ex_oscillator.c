@@ -73,10 +73,12 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
              SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID),
     .formats = SNDRV_PCM_FMTBIT_S16_LE,
     .rates = SNDRV_PCM_RATE_48000,
-    .rate_min = 48000,  // минимальная частота дискретизации (runtime->rate)
-    .rate_max = 48000,  // максимальная частота дискретизации (runtime->rate)
-    .channels_min = 2,  // минимальное и максимальное количество каналов
-    .channels_max = 2,  // на моей системе вывод динамиков только в 2 канала
+    .rate_min =
+        48000,  // NOTE: минимальная частота дискретизации (runtime->rate)
+    .rate_max =
+        48000,  // NOTE: максимальная частота дискретизации (runtime->rate)
+    .channels_min = 2,
+    .channels_max = 2,
     .buffer_bytes_max = 128 * 1024,  // BUFFER_SIZE,
     .period_bytes_min = 256,
     .period_bytes_max = 16 * 1024,  // BUFFER_SIZE,
@@ -85,12 +87,12 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
 };
 
 // NOTE: пока кажется что с int работать проще, может понадобиться позже?
-/*struct ksound_wave
- * {
- *    int frequency;  // частота в Гц
- *    int phase;      // текущая фаза
- *    int amplitude;  // амплитуда - возможно потом?
- * };*/
+// struct ksound_wave
+//{
+//    int frequency;  // частота в Гц
+//    int phase;      // текущая фаза
+//    int amplitude;  // амплитуда - возможно потом?
+//};
 
 // NOTE: static u32 sound_waves[] = { MAKEWAVE(100, 0, 480) };
 static u32 *sound_waves = NULL;
@@ -140,8 +142,7 @@ static int wave_count = 0;
 // }
 
 /*
- * Генерирует несколько гармонических сигналов. Сигнал описан в структуре
- * sine_wave.
+ * Генерирует несколько гармонических сигналов. Сигнал укакован в u32.
  */
 static void make_sine_waves(s16 *samples, size_t sample_count, int rate,
                             u32 *waves, int wave_count) {
@@ -185,8 +186,8 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer) {
     struct snd_pcm_substream *const substream = card->substream;
     struct snd_pcm_runtime *const runtime = substream->runtime;
 
-    // period - аудио фрагмент, frames - количество дискрет на фрагмент. У нас
-    // 2 канала и 16 бит на канал поэтому frames_to_bytes вернёт period * 4.
+    // NOTE: period - аудио фрагмент, frames - количество дискрет на фрагмент. У
+    // нас 2 канала и 16 бит на канал поэтому frames_to_bytes вернёт period * 4
     s16 *const samples = (s16 *)(runtime->dma_area + card->hw_ptr);
     size_t const period_bytes = frames_to_bytes(runtime, runtime->period_size);
     size_t const buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
@@ -204,10 +205,9 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer) {
 
     if (!atomic_read(&card->running)) return HRTIMER_NORESTART;
 
-    // проверить что не выходим за область DMA, если выйти возможно падение
-    // ядра
     mutex_lock(&mutex);
 
+    // NOTE: проверить что не выходим за область DMA, если выйти будет плохо
     if (buffer_bytes - card->hw_ptr >= period_bytes) {
         // TODO: после удаления последней волны её всё равно слышно если не
         // записать в буфер нули. Как будто в DMA буфере остаются данные. Можно
@@ -218,21 +218,22 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer) {
 
     mutex_unlock(&mutex);
 
-    // Подвинуть указатель на следующий фрагмент. Лучше переходить в начало или
-    // с сохранением хвоста?
-    // card->hw_ptr = (card->hw_ptr + period_bytes) % runtime->dma_bytes;
+    // TODO: подвинуть указатель на следующий фрагмент. Лучше переходить в
+    // начало или с сохранением хвоста? Может ли вообще такое быть?
+    // card->hw_ptr = (card->hw_ptr + period_bytes) % buffer_bytes;
     card->hw_ptr += period_bytes;
     if (card->hw_ptr >= buffer_bytes) card->hw_ptr = 0;
 
-    // уведомить ALSA
+    // NOTE: уведомить ALSA
     snd_pcm_period_elapsed(substream);
 
-    // Продолжительность периода в нс. Количество дискрет поделить на частоту
-    // дискретизации даёт секунды, умножаем на NSEC_PER_SEC чтобы получить нс.
+    // NOTE: продолжительность периода в нс. Количество дискрет поделить на
+    // частоту дискретизации даёт секунды, умножаем на NSEC_PER_SEC чтобы
+    // получить нс.
     period_ns = div_u64(runtime->period_size * NSEC_PER_SEC, runtime->rate);
 
-    // Задать таймер, так тоже можно. Пока не понимаю как лучше
-    // hrtimer_forward_now(timer, ns_to_ktime(period_ns))
+    // TODO: так тоже можно hrtimer_forward_now(timer, ns_to_ktime(period_ns)),
+    // пока не понимаю как лучше
     hrtimer_forward(timer, now, ns_to_ktime(period_ns));
     return HRTIMER_RESTART;
 }
@@ -247,16 +248,18 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream) {
     card->substream = substream;
     substream->private_data = card;
 
-    // обязательно заполнить во время open, иначе ошибка открытия потока!
+    // NOTE: обязательно заполнить во время open, иначе ошибка открытия потока!
     runtime->hw = snd_ksound_capture_hw;
 
-    // snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_RATE,
-    // SAMPLE_RATE); snd_pcm_hw_constraint_single(runtime,
-    // SNDRV_PCM_HW_PARAM_CHANNELS, 2); snd_pcm_hw_constraint_single(runtime,
+    // TODO: snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_RATE,
+    // SAMPLE_RATE);
+    // TODO: snd_pcm_hw_constraint_single(runtime,
+    // SNDRV_PCM_HW_PARAM_CHANNELS, 2);
+    // TODO: snd_pcm_hw_constraint_single(runtime,
     // SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE);
-    // snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
-    // snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES,
-    // 64, 1*1024*1024);
+    // TODO: snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+    // TODO: snd_pcm_hw_constraint_minmax(runtime,
+    // SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 64, 1*1024*1024);
 
     pr_info("snd_ksound_capture_open\n");
     return 0;
@@ -284,9 +287,9 @@ static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream,
     // N 6.1.130 #3 [Сб окт 11 20:22:47 2025] Hardware name: innotek GmbH
     // VirtualBox/VirtualBox, BIOS VirtualBox 12/01/2006
 
-    // NOTE: snd_pcm_lib_free_vmalloc_buffer(substream) нужно ли???
+    // TODO: snd_pcm_lib_free_vmalloc_buffer(substream) нужно ли???
 
-    // NOTE:
+    // NOTE: похоже если ALSA драйвер, то malloc если устройство то vmalloc
     // https://www.kernel.org/doc/html/v5.1/sound/kernel-api/writing-an-alsa-driver.html
     // return snd_pcm_lib_malloc_pages(substream, buffer_bytes);
 
@@ -296,7 +299,7 @@ static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream,
 static int snd_ksound_capture_hw_free(struct snd_pcm_substream *substream) {
     pr_info("snd_ksound_capture_hw_free\n");
 
-    // NOTE: //
+    // NOTE: если ALSA то free, если устройство, то vmalloc_free
     // https://www.kernel.org/doc/html/v4.16/sound/kernel-api/writing-an-alsa-driver.html
     // return snd_pcm_lib_free_pages(substream);
 
@@ -309,8 +312,9 @@ static int snd_ksound_capture_hw_free(struct snd_pcm_substream *substream) {
 static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream) {
     struct snd_pcm_runtime *runtime = substream->runtime;
 
-    int buffer_bytes = frames_to_bytes(
-        runtime, runtime->buffer_size);  // params_buffer_bytes(hw_params)
+    // TODO: не совсем понимаю что делать в этой функции?
+    // NOTE: правильно через params_buffer_bytes(hw_params)
+    int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
 
     pr_info(
         "snd_ksound_capture_prepare buffer_size=%ld, period_size=%ld, "
@@ -337,7 +341,7 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream,
             card->hw_ptr = 0;
             atomic_set(&card->running, 1);
 
-            // запустить таймер
+            // NOTE: запустить таймер
             hrtimer_init(&card->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
             card->timer.function = ksound_timer_callback;
             hrtimer_start(&card->timer, ns_to_ktime(0), HRTIMER_MODE_REL);
@@ -348,7 +352,7 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream,
         case SNDRV_PCM_TRIGGER_STOP:
             atomic_set(&card->running, 0);
 
-            // остановить таймер
+            // NOTE: остановить таймер
             hrtimer_cancel(&card->timer);
             return 0;
 
@@ -380,7 +384,7 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(
     return bytes_to_frames(substream->runtime, card->hw_ptr);
 }
 
-// TODO: почему этот метод магическим образом очищает поток?
+// HACK: почему этот метод магическим образом очищает поток?
 // static snd_pcm_uframes_t snd_ksound_capture_pointer(
 //    struct snd_pcm_substream *substream) {
 //    struct ksound_card *card = substream->private_data;
@@ -422,10 +426,11 @@ static int snd_ksound_capture_close(struct snd_pcm_substream *substream) {
  * Таблица операторов PCM. Проходит цикл open, hw_params, prepare, trigger,
  * pointer?, trigger, free, close.
  */
+// NOTE: ioctl обязательно иначе не откроется через alsaloop
 static struct snd_pcm_ops snd_ksound_capture_ops = {
     .open = snd_ksound_capture_open,
     .close = snd_ksound_capture_close,
-    .ioctl = snd_pcm_lib_ioctl,  // иначе не откроется например через alsaloop
+    .ioctl = snd_pcm_lib_ioctl,
     .hw_params = snd_ksound_capture_hw_params,
     .hw_free = snd_ksound_capture_hw_free,
     .prepare = snd_ksound_capture_prepare,
@@ -610,11 +615,9 @@ static const struct file_operations fops = {
     .unlocked_ioctl = my_ioctl,
 };
 
-/*
- * Глобальные переменные для хранения дескрипторов устройства, карты и пр. Эти
- * значения зашиваются в поля private_data карты и pcm потока и функциям
- * следует брать эти данные оттуда поэтому эти переменные максимально внизу.
- */
+// NOTE: глобальные переменные для хранения дескрипторов устройства, карты и пр.
+// Эти значения зашиваются в поля private_data карты и pcm потока и функциям
+// следует брать эти данные оттуда поэтому эти переменные максимально внизу.
 static dev_t dev_num;
 static struct cdev my_cdev;
 static struct class *my_class;
@@ -765,6 +768,9 @@ __error1:
  * Уничтожает модуль, освобождает выделенные ресурсы.
  */
 static void __exit ksound_exit(void) {
+    // FIXME: не попадаю сюда при попытке выгрузить драйвер потому что по всей
+    // видимости его удерживает ALSA получаю ошибку rmmod: ERROR: Module
+    // ex_oscillator is in use
     BUG_ON(k_card == NULL);
     BUG_ON(k_card->card == NULL);
     BUG_ON(pdev == NULL);
