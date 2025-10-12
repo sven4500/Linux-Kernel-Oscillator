@@ -501,8 +501,10 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
         phase = GETWAVEPHASE(wave);
         freq = GETWAVEFREQ(wave);
 
-        pr_info("my_ioctl add wave=0x%x, amp=%d, phase=%d, freq=%d\n", wave,
-                amp, phase, freq);
+        pr_info(
+            "my_ioctl add wave=0x%x, amp=%d, phase=%d, freq=%d, "
+            "new_wave_count=%d, old_wave_count=%d\n",
+            wave, amp, phase, freq, new_wave_count, old_wave_count);
 
         mutex_lock(&mutex);
 
@@ -556,12 +558,14 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             sound_waves = NULL;
             wave_count = 0;
         } else if (new_wave_count < old_wave_count) {
-            /*new_waves = kzalloc(new_wave_count * sizeof(u32), GFP_KERNEL);
+            new_waves = kzalloc(new_wave_count * sizeof(u32), GFP_KERNEL);
 
             if (new_waves != NULL) {
                 // NOTE: второй проход, выбрать только нужные волны
                 for (i = 0, j = 0; i < old_wave_count; ++i) {
                     if (GETWAVEFREQ(old_waves[i]) != freq) {
+                        BUG_ON(j >= new_wave_count);
+
                         new_waves[j] = old_waves[i];
                         ++j;
                     }
@@ -571,7 +575,7 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
 
                 sound_waves = new_waves;
                 wave_count = new_wave_count;
-            }*/
+            }
         }
 
         mutex_unlock(&mutex);
@@ -629,7 +633,7 @@ static struct platform_device *pdev;
 static struct snd_pcm *pcm;
 static struct ksound_card *k_card;
 
-// можно ли так инициализировать драйвер платформы?
+// TODO: можно ли так инициализировать драйвер платформы?
 // static struct platform_driver my_card_driver = {
 //    .driver = {
 //        .name = "mycard",
@@ -637,7 +641,6 @@ static struct ksound_card *k_card;
 //    .probe  = my_card_probe,
 //    .remove = my_card_remove,
 //};
-
 // module_platform_driver(my_card_driver);
 
 /*
@@ -671,7 +674,7 @@ static int __init ksound_init(void) {
         goto __error3;
     }
 
-    // добавляет файл /dev/ksound_device
+    // NOTE: добавляет файл /dev/ksound_device
     my_device = device_create(my_class, NULL, dev_num, NULL, DEVICE_NAME);
     if (IS_ERR(my_device)) {
         pr_info("failed to create device\n");
@@ -679,7 +682,7 @@ static int __init ksound_init(void) {
         goto __error4;
     }
 
-    // создать драйвер платформы
+    // NOTE: создать драйвер платформы
     pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
     if (IS_ERR(pdev)) {
         pr_info("failed to create platform device\n");
@@ -687,7 +690,7 @@ static int __init ksound_init(void) {
         goto __error5;
     }
 
-    // создать виртуальную карту
+    // NOTE: создать виртуальную карту
     k_card = kzalloc(sizeof(*k_card), GFP_KERNEL);
     if (!k_card) {
         pr_info("failed to allocate card struct\n");
@@ -695,12 +698,12 @@ static int __init ksound_init(void) {
         goto __error6;
     }
 
-    // инциализация полей структуры карты
+    // NOTE: инциализация полей структуры карты
     atomic_set(&k_card->running, 0);
     k_card->hw_ptr = 0;
 
-    // создать ALSA карту, в качестве родителя драйвер платформы (aplay -l)
-    // для чего приватные данные (0)?
+    // NOTE: создать ALSA карту, в качестве родителя драйвер платформы (aplay
+    // -l) для чего приватные данные (0)?
     err = snd_card_new(&pdev->dev, -1, DRIVER_NAME, THIS_MODULE, 0,
                        &k_card->card);
     if (err < 0) {
@@ -713,9 +716,8 @@ static int __init ksound_init(void) {
     strcpy(k_card->card->shortname, CARD_NAME);
     sprintf(k_card->card->longname, "%s at virtual", CARD_NAME);
 
-    // создать pcm устройство
-    err = snd_pcm_new(k_card->card, DRIVER_NAME, 0, 0, 1,
-                      &pcm);  // playback, capture
+    // NOTE: создать pcm устройство, playback_count=0, capture_count=1
+    err = snd_pcm_new(k_card->card, DRIVER_NAME, 0, 0, 1, &pcm);
     if (err < 0) {
         pr_info("failed to create pcm stream\n");
         err = -1;
@@ -735,7 +737,7 @@ static int __init ksound_init(void) {
     // * 1024, 64 * 1024); snd_pcm_set_managed_buffer_all(pcm,
     // SNDRV_DMA_TYPE_VMALLOC, NULL, 64*1024, 64*1024);
 
-    // зарегистрировать карту
+    // NOTE: зарегистрировать карту
     err = snd_card_register(k_card->card);
     if (err < 0) {
         pr_info("failed to register sound card\n");
@@ -747,7 +749,7 @@ static int __init ksound_init(void) {
     return 0;
 
 __error9:
-    // NOTE: освобождается через snd_card_free?
+    // TODO: освобождается через snd_card_free?
 __error8:
     BUG_ON(k_card == NULL || k_card->card == NULL);
     snd_card_free(k_card->card);
@@ -779,7 +781,7 @@ static void __exit ksound_exit(void) {
 
     atomic_set(&k_card->running, 0);
 
-    // snd_card_disconnect(k_card->card); // нужен ли disconnect?
+    // TODO: нужен ли snd_card_disconnect(k_card->card)?
     snd_card_free(k_card->card);
     kfree(k_card);
 
