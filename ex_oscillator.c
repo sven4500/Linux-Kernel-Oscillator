@@ -9,7 +9,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
-#include <linux/types.h>   // s16, u64, size_t, ...
+#include <linux/types.h>   // s16, u64, size_t, atomic_t, ...
 #include <sound/asound.h>  // snd_pcm_uframes_t, ...
 #include <sound/core.h>
 #include <sound/initval.h>
@@ -28,6 +28,8 @@
 // NOTE: alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
 // NOTE: speaker-test -D hw:1,0 -c 1 -t sine -r 48000 -f 400 | aplay -D hw:0,0
 // -r 48000 -f S16_LE -c 2 -B 100000 -v
+// NOTE: aplay -l
+// NOTE: arecord -l
 
 #define DEVICE_NAME "ksound_device"
 #define CLASS_NAME "ksound_class"
@@ -424,7 +426,7 @@ static int snd_ksound_capture_close(struct snd_pcm_substream *substream) {
 
 /*
  * Таблица операторов PCM. Проходит цикл open, hw_params, prepare, trigger,
- * pointer?, trigger, free, close.
+ * pointer?, trigger, hw_free, close.
  */
 // NOTE: ioctl обязательно иначе не откроется через alsaloop
 static struct snd_pcm_ops snd_ksound_capture_ops = {
@@ -771,6 +773,7 @@ static void __exit ksound_exit(void) {
     // FIXME: не попадаю сюда при попытке выгрузить драйвер потому что по всей
     // видимости его удерживает ALSA получаю ошибку rmmod: ERROR: Module
     // ex_oscillator is in use
+    // TODO: fops device counter
     BUG_ON(k_card == NULL);
     BUG_ON(k_card->card == NULL);
     BUG_ON(pdev == NULL);
