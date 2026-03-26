@@ -40,8 +40,8 @@
 #define CMDADDWAVE _IOW(MYDEVMAGIC, 0, u32)
 #define CMDREMOVEWAVE _IOW(MYDEVMAGIC, 1, u32)
 
-// NOTE: амплитуда 7 бит (128 знач., валидные 0..100), фаза 9 бит (512 знач.,
-// валидные 0..360), частота 16 бит (64к знач., валидные 0..48000)
+// NOTE: amplitude 7 bits (128 values, valid 0..100), phase 9 bits (512 values,
+// valid 0..360), frequency 16 bits (64k values, valid 0..48000)
 #define MAKEWAVE(amp, phase, freq) \
     (((amp)&0x7f) | (((phase)&0x1ff) << 7) | (((freq)&0xffff) << 16))
 
@@ -54,21 +54,21 @@
 #define SETWAVEFREQ(wave, freq) (((wave)&0x0000FFFF) | (((freq)&0xffff) << 16))
 
 /*
- * Описание виртуальной карты. К типам принадлежащим этому модулу добавляю
- * префикс ksound_.
+ * Virtual card description. Types belonging to this module are prefixed
+ * with ksound_.
  */
 struct ksound_card {
     struct snd_card *card;
     struct hrtimer timer;
     struct snd_pcm_substream *substream;
     atomic_t running;
-    snd_pcm_uframes_t hw_ptr;  // указатель проигрываемое место в бфере
+    snd_pcm_uframes_t hw_ptr;  // pointer to the current playback position in the buffer
 };
 
 static DEFINE_MUTEX(mutex);
 
 /*
- * Описывает PCM поток
+ * Describes the PCM stream.
  */
 static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .info = (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
@@ -76,9 +76,9 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .formats = SNDRV_PCM_FMTBIT_S16_LE,
     .rates = SNDRV_PCM_RATE_48000,
     .rate_min =
-        48000,  // NOTE: минимальная частота дискретизации (runtime->rate)
+        48000,  // NOTE: minimum sample rate (runtime->rate)
     .rate_max =
-        48000,  // NOTE: максимальная частота дискретизации (runtime->rate)
+        48000,  // NOTE: maximum sample rate (runtime->rate)
     .channels_min = 2,
     .channels_max = 2,
     .buffer_bytes_max = 128 * 1024,  // BUFFER_SIZE,
@@ -88,12 +88,12 @@ static struct snd_pcm_hardware snd_ksound_capture_hw = {
     .periods_max = 1024,
 };
 
-// NOTE: пока кажется что с int работать проще, может понадобиться позже?
+// NOTE: it seems easier to work with int for now, might be needed later?
 // struct ksound_wave
 //{
-//    int frequency;  // частота в Гц
-//    int phase;      // текущая фаза
-//    int amplitude;  // амплитуда - возможно потом?
+//    int frequency;  // frequency in Hz
+//    int phase;      // current phase
+//    int amplitude;  // amplitude - maybe later?
 //};
 
 // NOTE: static u32 sound_waves[] = { MAKEWAVE(100, 0, 480) };
@@ -101,7 +101,7 @@ static u32 *sound_waves = NULL;
 static int wave_count = 0;
 
 /*
- * Генерирует один пилообразный сигнал.
+ * Generates a single sawtooth wave.
  */
 // static void make_saw_wave(s16 *samples, size_t count, int rate, u32 wave) {
 //     size_t i;
@@ -110,19 +110,19 @@ static int wave_count = 0;
 //     int const freq = GETWAVEFREQ(wave);
 //
 //     for (i = 0; i < count; i++) {
-//         // NOTE: 65536, 32768, 16384, 8192, 4096 чтобы сделать потише
+//         // NOTE: 65536, 32768, 16384, 8192, 4096 to make it quieter
 //         s16 const sample = (s16)(((phase * 8192) / rate) - 4096);
 //
 //         phase += freq;
 //         if (phase >= rate) phase -= rate;
 //
-//         // NOTE: записать дискрету L+R, не работает с другим количество
-//         каналов samples[i * 2 + 0] = sample; samples[i * 2 + 1] = sample;
+//         // NOTE: write sample L+R, does not work with a different number of
+//         channels samples[i * 2 + 0] = sample; samples[i * 2 + 1] = sample;
 //     }
 // }
 
 /*
- * Генерирует один гармонический сигнал.
+ * Generates a single harmonic (sine) wave.
  */
 // static void make_sine_wave(s16 *samples, size_t count, int rate, u32 wave) {
 //     int i;
@@ -144,7 +144,7 @@ static int wave_count = 0;
 // }
 
 /*
- * Генерирует несколько гармонических сигналов. Сигнал укакован в u32.
+ * Generates multiple harmonic (sine) waves. Each wave is packed into a u32.
  */
 static void make_sine_waves(s16 *samples, size_t sample_count, int rate,
                             u32 *waves, int wave_count) {
@@ -166,7 +166,7 @@ static void make_sine_waves(s16 *samples, size_t sample_count, int rate,
             phase += step;
             if (phase >= 360) phase -= 360;
 
-            // NOTE: нужно сохранить новую фазу, иначе волна не развивается
+            // NOTE: new phase must be saved, otherwise the wave does not progress
             waves[j] = SETWAVEPHASE(wave, phase);
 
             mixed += sample;
@@ -180,7 +180,7 @@ static void make_sine_waves(s16 *samples, size_t sample_count, int rate,
 }
 
 /*
- * Обработка сэмплов буфера. runtime->rate частота дискретизации канала.
+ * Buffer sample processing. runtime->rate is the channel sample rate.
  */
 static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer) {
     struct ksound_card *const card =
@@ -188,16 +188,16 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer) {
     struct snd_pcm_substream *const substream = card->substream;
     struct snd_pcm_runtime *const runtime = substream->runtime;
 
-    // NOTE: period - аудио фрагмент, frames - количество дискрет на фрагмент. У
-    // нас 2 канала и 16 бит на канал поэтому frames_to_bytes вернёт period * 4
+    // NOTE: period - audio fragment, frames - number of samples per fragment. We
+    // have 2 channels and 16 bits per channel so frames_to_bytes returns period * 4
     s16 *const samples = (s16 *)(runtime->dma_area + card->hw_ptr);
     size_t const period_bytes = frames_to_bytes(runtime, runtime->period_size);
     size_t const buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
     u64 period_ns;
     ktime_t const now = ktime_get();
 
-    // NOTE: runtime->dma_bytes размер DMA области в байтах, заметил что DMA
-    // область может быть чуть больше чем размер буфера
+    // NOTE: runtime->dma_bytes is the DMA area size in bytes; the DMA area may be
+    // slightly larger than the buffer size
     BUG_ON(runtime->dma_bytes < buffer_bytes);
     BUG_ON(card->hw_ptr >= buffer_bytes);
 
@@ -209,39 +209,38 @@ static enum hrtimer_restart ksound_timer_callback(struct hrtimer *timer) {
 
     mutex_lock(&mutex);
 
-    // NOTE: проверить что не выходим за область DMA, если выйти будет плохо
+    // NOTE: verify we do not go out of the DMA area, going out of bounds would be bad
     if (buffer_bytes - card->hw_ptr >= period_bytes) {
-        // TODO: после удаления последней волны её всё равно слышно если не
-        // записать в буфер нули. Как будто в DMA буфере остаются данные. Можно
-        // ли его не перезаписывать DMA каждый раз?
+        // TODO: after removing the last wave it is still audible unless zeros are
+        // written to the buffer. As if data remains in the DMA buffer. Is it
+        // possible to skip overwriting the DMA buffer every time?
         make_sine_waves(samples, runtime->period_size, runtime->rate,
                         sound_waves, wave_count);
     }
 
     mutex_unlock(&mutex);
 
-    // TODO: подвинуть указатель на следующий фрагмент. Лучше переходить в
-    // начало или с сохранением хвоста? Может ли вообще такое быть?
+    // TODO: advance the pointer to the next fragment. Is it better to wrap to
+    // the beginning or to preserve the tail? Can this situation even occur?
     // card->hw_ptr = (card->hw_ptr + period_bytes) % buffer_bytes;
     card->hw_ptr += period_bytes;
     if (card->hw_ptr >= buffer_bytes) card->hw_ptr = 0;
 
-    // NOTE: уведомить ALSA
+    // NOTE: notify ALSA
     snd_pcm_period_elapsed(substream);
 
-    // NOTE: продолжительность периода в нс. Количество дискрет поделить на
-    // частоту дискретизации даёт секунды, умножаем на NSEC_PER_SEC чтобы
-    // получить нс.
+    // NOTE: period duration in nanoseconds. Number of samples divided by the
+    // sample rate gives seconds; multiply by NSEC_PER_SEC to get nanoseconds.
     period_ns = div_u64(runtime->period_size * NSEC_PER_SEC, runtime->rate);
 
-    // TODO: так тоже можно hrtimer_forward_now(timer, ns_to_ktime(period_ns)),
-    // пока не понимаю как лучше
+    // TODO: this also works: hrtimer_forward_now(timer, ns_to_ktime(period_ns)),
+    // not sure which approach is better
     hrtimer_forward(timer, now, ns_to_ktime(period_ns));
     return HRTIMER_RESTART;
 }
 
 /*
- * открыть PCM поток
+ * Open PCM stream.
  */
 static int snd_ksound_capture_open(struct snd_pcm_substream *substream) {
     struct ksound_card *card = substream->pcm->private_data;
@@ -250,7 +249,7 @@ static int snd_ksound_capture_open(struct snd_pcm_substream *substream) {
     card->substream = substream;
     substream->private_data = card;
 
-    // NOTE: обязательно заполнить во время open, иначе ошибка открытия потока!
+    // NOTE: must be filled during open, otherwise stream open error!
     runtime->hw = snd_ksound_capture_hw;
 
     // TODO: snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_RATE,
@@ -281,17 +280,17 @@ static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream,
         return EINVAL;
     }
 
-    // NOTE: исправляется выравниванием буфера по границе страницы alloc_bytes
-    // [Сб окт 11 20:22:47 2025] BUG: KASAN: vmalloc-out-of-bounds in
-    // snd_pcm_hw_params+0x10ea/0x15a0 [snd_pcm] [Сб окт 11 20:22:47 2025] Write
-    // of size 20480 at addr ffffc900001b7000 by task pulseaudio/1509 [Сб окт 11
+    // NOTE: fixed by aligning the buffer to a page boundary via alloc_bytes
+    // [Sat Oct 11 20:22:47 2025] BUG: KASAN: vmalloc-out-of-bounds in
+    // snd_pcm_hw_params+0x10ea/0x15a0 [snd_pcm] [Sat Oct 11 20:22:47 2025] Write
+    // of size 20480 at addr ffffc900001b7000 by task pulseaudio/1509 [Sat Oct 11
     // 20:22:47 2025] CPU: 4 PID: 1509 Comm: pulseaudio Tainted: G    B OE
-    // N 6.1.130 #3 [Сб окт 11 20:22:47 2025] Hardware name: innotek GmbH
+    // N 6.1.130 #3 [Sat Oct 11 20:22:47 2025] Hardware name: innotek GmbH
     // VirtualBox/VirtualBox, BIOS VirtualBox 12/01/2006
 
-    // TODO: snd_pcm_lib_free_vmalloc_buffer(substream) нужно ли???
+    // TODO: snd_pcm_lib_free_vmalloc_buffer(substream) is this needed???
 
-    // NOTE: похоже если ALSA драйвер, то malloc если устройство то vmalloc
+    // NOTE: it seems if an ALSA driver, use malloc; if a device, use vmalloc
     // https://www.kernel.org/doc/html/v5.1/sound/kernel-api/writing-an-alsa-driver.html
     // return snd_pcm_lib_malloc_pages(substream, buffer_bytes);
 
@@ -301,7 +300,7 @@ static int snd_ksound_capture_hw_params(struct snd_pcm_substream *substream,
 static int snd_ksound_capture_hw_free(struct snd_pcm_substream *substream) {
     pr_info("snd_ksound_capture_hw_free\n");
 
-    // NOTE: если ALSA то free, если устройство, то vmalloc_free
+    // NOTE: if ALSA use free, if device use vmalloc_free
     // https://www.kernel.org/doc/html/v4.16/sound/kernel-api/writing-an-alsa-driver.html
     // return snd_pcm_lib_free_pages(substream);
 
@@ -309,13 +308,13 @@ static int snd_ksound_capture_hw_free(struct snd_pcm_substream *substream) {
 }
 
 /*
- * подготовка PCM потока
+ * Prepare PCM stream.
  */
 static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream) {
     struct snd_pcm_runtime *runtime = substream->runtime;
 
-    // TODO: не совсем понимаю что делать в этой функции?
-    // NOTE: правильно через params_buffer_bytes(hw_params)
+    // TODO: not entirely sure what to do in this function?
+    // NOTE: correctly done via params_buffer_bytes(hw_params)
     int buffer_bytes = frames_to_bytes(runtime, runtime->buffer_size);
 
     pr_info(
@@ -328,7 +327,7 @@ static int snd_ksound_capture_prepare(struct snd_pcm_substream *substream) {
 }
 
 /*
- * смена состояние PCM
+ * PCM state change.
  */
 static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream,
                                       int cmd) {
@@ -343,7 +342,7 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream,
             card->hw_ptr = 0;
             atomic_set(&card->running, 1);
 
-            // NOTE: запустить таймер
+            // NOTE: start the timer
             hrtimer_init(&card->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
             card->timer.function = ksound_timer_callback;
             hrtimer_start(&card->timer, ns_to_ktime(0), HRTIMER_MODE_REL);
@@ -354,7 +353,7 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream,
         case SNDRV_PCM_TRIGGER_STOP:
             atomic_set(&card->running, 0);
 
-            // NOTE: остановить таймер
+            // NOTE: stop the timer
             hrtimer_cancel(&card->timer);
             return 0;
 
@@ -372,7 +371,7 @@ static int snd_ksound_capture_trigger(struct snd_pcm_substream *substream,
 }
 
 /*
- * Указатель на место проигрывания в буфере. Возвращает указатель в дискретах.
+ * Pointer to the playback position in the buffer. Returns the pointer in frames.
  */
 static snd_pcm_uframes_t snd_ksound_capture_pointer(
     struct snd_pcm_substream *substream) {
@@ -382,11 +381,11 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(
     // card->hw_ptr, runtime->period_size, bytes_to_frames(substream->runtime,
     // card->hw_ptr));
 
-    // NOTE: похоже что ALSA подсистеме нужен указатель в дискретах, а не байтах
+    // NOTE: the ALSA subsystem expects a pointer in frames, not bytes
     return bytes_to_frames(substream->runtime, card->hw_ptr);
 }
 
-// HACK: почему этот метод магическим образом очищает поток?
+// HACK: why does this method magically clear the stream?
 // static snd_pcm_uframes_t snd_ksound_capture_pointer(
 //    struct snd_pcm_substream *substream) {
 //    struct ksound_card *card = substream->private_data;
@@ -411,12 +410,12 @@ static snd_pcm_uframes_t snd_ksound_capture_pointer(
 //}
 
 /*
- * закрыть PCM поток
+ * Close PCM stream.
  */
 static int snd_ksound_capture_close(struct snd_pcm_substream *substream) {
     struct ksound_card *card = substream->private_data;
 
-    // NOTE: substream освобождается на этапе hw_free
+    // NOTE: substream is released at the hw_free stage
     card->substream = NULL;
     substream->private_data = NULL;
 
@@ -425,10 +424,10 @@ static int snd_ksound_capture_close(struct snd_pcm_substream *substream) {
 }
 
 /*
- * Таблица операторов PCM. Проходит цикл open, hw_params, prepare, trigger,
- * pointer?, trigger, hw_free, close.
+ * PCM operations table. Goes through the cycle: open, hw_params, prepare,
+ * trigger, pointer?, trigger, hw_free, close.
  */
-// NOTE: ioctl обязательно иначе не откроется через alsaloop
+// NOTE: ioctl is required, otherwise it won't open via alsaloop
 static struct snd_pcm_ops snd_ksound_capture_ops = {
     .open = snd_ksound_capture_open,
     .close = snd_ksound_capture_close,
@@ -444,7 +443,7 @@ static struct snd_pcm_ops snd_ksound_capture_ops = {
 };
 
 /*
- * Реализует операцию open.
+ * Implements the open operation.
  */
 static int my_open(struct inode *inode, struct file *file) {
     pr_info("unimplemented open operation\n");
@@ -452,7 +451,7 @@ static int my_open(struct inode *inode, struct file *file) {
 }
 
 /*
- * Реализует операцию ioctl.
+ * Implements the ioctl operation.
  */
 static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     int const magic = _IOC_TYPE(cmd), nr = _IOC_NR(cmd);
@@ -539,7 +538,7 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
 
         mutex_lock(&mutex);
 
-        // NOTE: первый проход подсчитать сколько волн исключая заданную частоту
+        // NOTE: first pass: count the number of waves excluding the given frequency
         for (i = 0; i < old_wave_count; ++i) {
             if (GETWAVEFREQ(old_waves[i]) != freq) {
                 ++new_wave_count;
@@ -559,7 +558,7 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             new_waves = kzalloc(new_wave_count * sizeof(u32), GFP_KERNEL);
 
             if (new_waves != NULL) {
-                // NOTE: второй проход, выбрать только нужные волны
+                // NOTE: second pass: select only the needed waves
                 for (i = 0, j = 0; i < old_wave_count; ++i) {
                     if (GETWAVEFREQ(old_waves[i]) != freq) {
                         BUG_ON(j >= new_wave_count);
@@ -586,7 +585,7 @@ static long my_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
 }
 
 /*
- * Реализует операцию read.
+ * Implements the read operation.
  */
 static ssize_t my_read(struct file *file, char __user *buf, size_t count,
                        loff_t *offset) {
@@ -595,7 +594,7 @@ static ssize_t my_read(struct file *file, char __user *buf, size_t count,
 }
 
 /*
- * Реализует операцию write.
+ * Implements the write operation.
  */
 static ssize_t my_write(struct file *file, char __user const *buf, size_t count,
                         loff_t *offset) {
@@ -617,9 +616,9 @@ static const struct file_operations fops = {
     .unlocked_ioctl = my_ioctl,
 };
 
-// NOTE: глобальные переменные для хранения дескрипторов устройства, карты и пр.
-// Эти значения зашиваются в поля private_data карты и pcm потока и функциям
-// следует брать эти данные оттуда поэтому эти переменные максимально внизу.
+// NOTE: global variables for storing device, card, and other descriptors.
+// These values are set in the private_data fields of the card and pcm stream;
+// functions should read these values from there, hence these variables are at the bottom.
 static dev_t dev_num;
 static struct cdev my_cdev;
 static struct class *my_class;
@@ -629,7 +628,7 @@ static struct platform_device *pdev;
 static struct snd_pcm *pcm;
 static struct ksound_card *k_card;
 
-// TODO: можно ли так инициализировать драйвер платформы?
+// TODO: is it possible to initialize the platform driver this way?
 // static struct platform_driver my_card_driver = {
 //    .driver = {
 //        .name = "mycard",
@@ -640,8 +639,8 @@ static struct ksound_card *k_card;
 // module_platform_driver(my_card_driver);
 
 /*
- * Инициализирует модуль. Создаёт новый драйвер платформы который выступает в
- * качестве родителя для ALSA карты.
+ * Initializes the module. Creates a new platform driver that acts as the
+ * parent for the ALSA card.
  */
 static int __init ksound_init(void) {
     int err;
@@ -670,7 +669,7 @@ static int __init ksound_init(void) {
         goto __error3;
     }
 
-    // NOTE: добавляет файл /dev/ksound_device
+    // NOTE: creates the /dev/ksound_device file
     my_device = device_create(my_class, NULL, dev_num, NULL, DEVICE_NAME);
     if (IS_ERR(my_device)) {
         pr_info("failed to create device\n");
@@ -678,7 +677,7 @@ static int __init ksound_init(void) {
         goto __error4;
     }
 
-    // NOTE: создать драйвер платформы
+    // NOTE: create platform driver
     pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
     if (IS_ERR(pdev)) {
         pr_info("failed to create platform device\n");
@@ -686,7 +685,7 @@ static int __init ksound_init(void) {
         goto __error5;
     }
 
-    // NOTE: создать виртуальную карту
+    // NOTE: create virtual card
     k_card = kzalloc(sizeof(*k_card), GFP_KERNEL);
     if (!k_card) {
         pr_info("failed to allocate card struct\n");
@@ -694,12 +693,12 @@ static int __init ksound_init(void) {
         goto __error6;
     }
 
-    // NOTE: инциализация полей структуры карты
+    // NOTE: initialize card structure fields
     atomic_set(&k_card->running, 0);
     k_card->hw_ptr = 0;
 
-    // NOTE: создать ALSA карту, в качестве родителя драйвер платформы (aplay
-    // -l) для чего приватные данные (0)?
+    // NOTE: create ALSA card with the platform driver as parent (aplay -l);
+    // what are the private data (0) used for?
     err = snd_card_new(&pdev->dev, -1, DRIVER_NAME, THIS_MODULE, 0,
                        &k_card->card);
     if (err < 0) {
@@ -712,7 +711,7 @@ static int __init ksound_init(void) {
     strcpy(k_card->card->shortname, CARD_NAME);
     sprintf(k_card->card->longname, "%s at virtual", CARD_NAME);
 
-    // NOTE: создать pcm устройство, playback_count=0, capture_count=1
+    // NOTE: create pcm device, playback_count=0, capture_count=1
     err = snd_pcm_new(k_card->card, DRIVER_NAME, 0, 0, 1, &pcm);
     if (err < 0) {
         pr_info("failed to create pcm stream\n");
@@ -724,7 +723,7 @@ static int __init ksound_init(void) {
     pcm->private_data = k_card;
     pcm->info_flags = 0;
 
-    // NOTE: SNDRV_PCM_STREAM_PLAYBACK для устройства воспроизведения
+    // NOTE: use SNDRV_PCM_STREAM_PLAYBACK for a playback device
     snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_ksound_capture_ops);
 
     // TODO: snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_VMALLOC,
@@ -732,7 +731,7 @@ static int __init ksound_init(void) {
     // TODO: snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL,
     // 64 * 1024, 64 * 1024);
 
-    // NOTE: зарегистрировать карту
+    // NOTE: register the card
     err = snd_card_register(k_card->card);
     if (err < 0) {
         pr_info("failed to register sound card\n");
@@ -744,7 +743,7 @@ static int __init ksound_init(void) {
     return 0;
 
 __error9:
-    // TODO: освобождается через snd_card_free?
+    // TODO: is it freed via snd_card_free?
 __error8:
     BUG_ON(k_card == NULL || k_card->card == NULL);
     snd_card_free(k_card->card);
@@ -767,12 +766,11 @@ __error1:
 }
 
 /*
- * Уничтожает модуль, освобождает выделенные ресурсы.
+ * Destroys the module, frees allocated resources.
  */
 static void __exit ksound_exit(void) {
-    // FIXME: не попадаю сюда при попытке выгрузить драйвер потому что по всей
-    // видимости его удерживает ALSA получаю ошибку rmmod: ERROR: Module
-    // ex_oscillator is in use
+    // FIXME: this is not reached when trying to unload the driver because ALSA
+    // appears to hold it; getting error: rmmod: ERROR: Module ex_oscillator is in use
     // TODO: fops device counter
     BUG_ON(k_card == NULL);
     BUG_ON(k_card->card == NULL);

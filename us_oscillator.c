@@ -14,7 +14,7 @@
 #define CMDADDWAVE _IOW(MYDEVMAGIC, 0, uint32_t)
 #define CMDREMOVEWAVE _IOW(MYDEVMAGIC, 1, uint32_t)
 
-// NOTE: амплитуда 7 бит, фаза 9 бит, частота 16 бит
+// NOTE: amplitude 7 bits, phase 9 bits, frequency 16 bits
 #define MAKEWAVE(amp, phase, freq) \
     (((amp)&0x7f) | (((phase)&0x1ff) << 7) | (((freq)&0xffff) << 16))
 
@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // NOTE: проверка что макросы работают праильно
+    // NOTE: check that macros work correctly
     wave = MAKEWAVE(87, 319, 41980);
 
     expect(GETWAVEAMP(wave) == 87);
@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
         // https://stackoverflow.com/questions/58294019/leading-whitespace-when-using-scanf-with-c
         printf("input command (a, r, q): ");
         scanf(" %c",
-              &cmd);  // пробел - пропустить все не печатные символы в начале
+              &cmd);  // space - skip all non-printable characters at the beginning
         // cmd = getchar();
 
         if (cmd == 'a') {
