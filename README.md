@@ -1,86 +1,86 @@
-# Синтезатор звуковых волн Linux
+# Linux Kernel Sound Wave Synthesizer
 
-Данный проект содержит исходный код синтезатора звуковых волн, реализованный на уровне модуля ядра Linux. Код актуален для версии ядра 6.1.130 и поставляется "как есть". В коде присутствуют некоторые известные не решённые ошибки и проблемы (см. описание ниже).
+This project contains the source code of a sound wave synthesizer implemented as a Linux kernel module. The code targets kernel version 6.1.130 and is provided "as is". There are some known unresolved bugs and issues (see description below).
 
-## Общее описание
+## Overview
 
-Модуль ядра представляет собой символьный драйвер для ОС Linux. Программа из пользовательского пространства отправляет через ioctl драйверу команду "сгенерировать звуковую волну" (`CMDADDWAVE`). Команда содержит такие характеристики звуковой волны как частота, амплитуда и фаза (на данный момент реализована только частота).
+The kernel module is a character driver for Linux. A user-space program sends a "generate sound wave" command (`CMDADDWAVE`) to the driver via ioctl. The command contains the characteristics of the sound wave such as frequency, amplitude, and phase (only frequency is currently implemented).
 
-Драйвер использует подсистему для работы со звуком ALSA (продвинутая архитектура звука Linux). Драйвер генерирует звуковую волну и пишет её в буфер звукового устройства. Пока не был найден удовлетворительный способ писать звук прямиком в физический динамик устройства поэтому драйвер представляет собой виртуальный микрофон, поток которого через утилиту `alsaloop` может быть перенаправлен в физический динамик (см. описание ниже).
+The driver uses the ALSA (Advanced Linux Sound Architecture) subsystem. The driver generates a sound wave and writes it to the audio device buffer. Since a satisfactory way to write sound directly to the physical device speaker has not been found, the driver acts as a virtual microphone whose stream can be redirected to a physical speaker via the `alsaloop` utility (see description below).
 
-Команда `CMDADDWAVE` может быть отправлена многократно, одной или несколькими программами из пользовательского пространства. Драйвер складывает отдельные волны в единый звуковой сигнал. Команда `CMDREMOVEWAVE` удаляет волну заданной частоты.
+The `CMDADDWAVE` command can be sent multiple times by one or more user-space programs. The driver combines individual waves into a single audio signal. The `CMDREMOVEWAVE` command removes a wave of the given frequency.
 
-## Структура волны
+## Wave Structure
 
-Программа из пользовательского пространства вместе с командой ioctl отправляет одно 32-битное слово описывающее звуковую волну. В слово упаковываются три значения, характеризующие волну: частота, амплитуда и фаза. Используется следующее представление:
+The user-space program sends a single 32-bit word describing the sound wave together with the ioctl command. Three values characterizing the wave are packed into the word: frequency, amplitude, and phase. The following layout is used:
 
 ```
 +--------------------+--------------------+----------------------+
 | 0-6                | 7-15               | 16-31                |
 +--------------------+--------------------+----------------------+
-| амплитуда, 7 бит   | фаза, 9 бит        | частота, 16 бит      |
-| 128 знач. (0..100) | 512 знач. (0..360) | 64к знач. (0..48000) |
+| amplitude, 7 bits  | phase, 9 bits      | frequency, 16 bits   |
+| 128 values (0..100)| 512 values (0..360)| 64k values (0..48000)|
 +--------------------+--------------------+----------------------+
 ```
 
-Для удобства упаковки/распаковки в коде представлен ряд макросов `MAKEWAVE`, `GETWAVEAMP`, `SETWAVEAMP` и пр.
+A number of helper macros are provided for convenient packing/unpacking: `MAKEWAVE`, `GETWAVEAMP`, `SETWAVEAMP`, etc.
 
-## Как собрать
+## How to Build
 
-Makefile содержит несколько целей.
+The Makefile has several targets.
 
-`kbuild` собирает модуль ядра и помещает собранный модуль в каталог build. Собранный модуль можно самостоятельно загрузить в ядро при помощи системной утилиты insmod.
+`kbuild` builds the kernel module and places it in the build directory. The built module can be loaded into the kernel manually using the `insmod` system utility.
 
-`reinsmod` комплексная команда которая собирает модуль ядра, выгружает старый модуль (если ранее был загружен) и загружает новый. Удобно во время разработки или отладки.
+`reinsmod` is a composite command that builds the kernel module, unloads the old module (if one was previously loaded), and loads the new one. Useful during development or debugging.
 
-`app_us` собирает программу пользовательского пространства для отправки команд драйверу.
+`app_us` builds the user-space program for sending commands to the driver.
 
-Чтобы собрать модуль ядра и программу пользовательского пространства необходимо выполнить следующие команды:
+To build the kernel module and the user-space program, run the following commands:
 
 ```shell
 $ sudo make kbuild
 $ sudo make app_us
 ```
 
-В каталоге build должны появится два файла ex_oscillator.ko (модуль ядра) и us_oscillator (программа пользовательского пространства).
+Two files should appear in the build directory: `ex_oscillator.ko` (kernel module) and `us_oscillator` (user-space program).
 
-## Как запустить
+## How to Run
 
-Чтобы загрузить модуль ядра в большинстве случаев достаточно выполнить следующую команду:
+To load the kernel module, in most cases it is sufficient to run:
 
 ```shell
 $ sudo make reinsmod
 ```
 
-Если модуль ядра успешно загружен системная утилита dmesg должна показать сообщение: `kernel ALSA sound module loaded successfully`.
+If the kernel module is loaded successfully, the `dmesg` utility should show the message: `kernel ALSA sound module loaded successfully`.
 
-Когда модуль ядра загружен можно запустить программу пользовательского пространства (требуются привилегии суперпользователя), например, us_oscillator:
+Once the kernel module is loaded, the user-space program can be started (superuser privileges required), for example:
 
 ```shell
 $ sudo ./build/us_oscillator
 ```
 
-Через программу пользовательского пространства us_oscillator можно отправлять драйверу команды. Например, команда `a 100 0 480` отправляет драйверу запрос на генерацию звуковой волны 480 Гц  с амплитудой 100 и фазой 0. Команда `r 480` позволяет отменить ранее отправленный запрос на генерацию волны 480 Гц.
+Commands can be sent to the driver through `us_oscillator`. For example, the command `a 100 0 480` sends the driver a request to generate a 480 Hz sound wave with amplitude 100 and phase 0. The command `r 480` cancels a previously sent request to generate a 480 Hz wave.
 
-## Как настроить
+## How to Configure
 
-Чтобы настроить вывод звуковой волны в физический динамик необходимо запустить утилиту alsaloop:
+To configure sound wave output to a physical speaker, start the `alsaloop` utility:
 
 ```shell
 $ alsaloop -C hw:1,0 -P hw:0,0 -c 2 -f S16_LE -r 48000
 ```
 
-Через аргументы `-C` (capture device) и `-P` (playback device) задаётся конфигурация перенаправление потоков. Значения зависят от конфигурации конкретной системы. Список доступных на конкретной машине устройств может быть получен через вызов утилиты `aplay -l` и `arecord -l`.
+The `-C` (capture device) and `-P` (playback device) arguments configure stream redirection. The values depend on the configuration of the specific system. A list of devices available on a particular machine can be obtained with `aplay -l` and `arecord -l`.
 
-## Не решённые проблемы
+## Unresolved Issues
 
-1. Периодически появляется ошибка `buffer underrun`;
-2. Нет плавающих точек поэтому сложно вычислить шаг и волны близкие по частоте не отличаются по звуку;
-3. Не получается выгрузить модуль без флага -f (как будто удерживает ALSA);
-4. Устройство capture в связке с физическим playback через alsaloop. Как писать в физический playback в обход alsaloop?
+1. Occasional `buffer underrun` error;
+2. No floating-point support, making it difficult to calculate the step; waves with close frequencies sound the same;
+3. Cannot unload the module without the `-f` flag (ALSA appears to hold it);
+4. Capture device is redirected to physical playback via `alsaloop`. How to write to physical playback bypassing `alsaloop`?
 
-## Другие проблемы
+## Other Issues
 
-1. Нет тригонометрических функци, используется __fixp_sin32;
-2. Мало примеров использования alsa подсистемы в драйвере;
-3. Подсветку пока что наилучшим образом удалось настроить в eclipse.
+1. No trigonometric functions available, `__fixp_sin32` is used instead;
+2. Few examples of ALSA subsystem usage in a driver;
+3. The best syntax highlighting so far has been achieved in Eclipse.
